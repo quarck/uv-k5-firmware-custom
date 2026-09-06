@@ -6,7 +6,7 @@
 # ---- COMPILER/LINKER OPTIONS ----
 ENABLE_CLANG                  ?= 0
 ENABLE_SWD                    ?= 1
-ENABLE_OVERLAY                ?= 0
+ENABLE_OVERLAY                ?= 1
 ENABLE_LTO                    ?= 1
 
 # ---- STOCK QUANSHENG FERATURES ----
@@ -21,7 +21,7 @@ ENABLE_TX1750                 ?= 0
 ENABLE_PWRON_PASSWORD         ?= 0
 ENABLE_DTMF_CALLING           ?= 0
 ENABLE_FLASHLIGHT             ?= 0
-ENABLE_BOOTLOADER			 ?= 0
+ENABLE_BOOTLOADER			 ?= 1
 # ---- CUSTOM MODS ----
 ENABLE_BIG_FREQ               ?= 1
 ENABLE_KEEP_MEM_NAME          ?= 1
