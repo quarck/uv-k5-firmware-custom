@@ -548,8 +548,10 @@ const t_sidefunction *gSubMenu_SIDEFUNCTIONS = SIDEFUNCTIONS;
 const uint8_t gSubMenu_SIDEFUNCTIONS_size = ARRAY_SIZE(SIDEFUNCTIONS);
 #endif
 
-// Derived from the table itself so it tracks the ENABLE_* guards in MenuList[]
-const uint8_t gMenuListSize = ARRAY_SIZE(MenuList);
+// Derived from the table itself so it tracks the ENABLE_* guards in MenuList[].
+// MenuList[] ends with a 0xff sentinel entry that is not a selectable item,
+// so the usable count is one less than the array size.
+const uint8_t gMenuListSize = ARRAY_SIZE(MenuList) - 1;
 
 bool gIsInSubMenu;
 uint8_t gMenuCursor;
