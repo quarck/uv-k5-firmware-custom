@@ -1,3 +1,5 @@
+This code is a form from [losehu/uv-k5-firmware-custom](https://github.com/losehu/uv-k5-firmware-custom) - all credit goes there.
+
 # [K5Web]( https://k5.vicicode.com/)
 * Supports online firmware functionality compilation, no need to install the compilation environment!!
 * Doppler satellite, boot image text, SI4732 SSB patch frequency writing method!
@@ -222,18 +224,17 @@ You can customize the firmware by enabling/disabling various compilation options
 | ENABLE_OVERLAY                         | CPU FLASH-related content, not needed                                                                                           |
 | ENABLE_LTO                             | Reduce the size of the compiled firmware, but may break EEPROM reading (OVERLAY will be disabled after enabling)                |
 
-# Donations
 
-If this project has been helpful to you, consider sponsoring to support development work.
+## Building
 
-[Donation List](https://losehu.github.io/payment-codes/#%E6%94%B6%E6%AC%BE%E7%A0%81) Thank you very much for
-your support!!!
+Install necessary toolset:
 
-Donation Codes:
+```
+sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi python3-crcmod
+```
 
-[![Donation Codes](https://github.com/losehu/uv-k5-firmware-chinese/blob/main/payment/show.png)](https://losehu.github.io/payment-codes/)
+then just:
 
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=losehu/uv-k5-firmware-custom&type=Date)](https://star-history.com/#losehu/uv-k5-firmware-custom&Date)
+```
+make build <PARAM1>=<value1> <PARAM2>=<value2>...
+```

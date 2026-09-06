@@ -941,9 +941,11 @@ void UI_DisplayMain(void) {
                 const unsigned int len = strlen(gDTMF_RX_live);
                 const unsigned int idx = (len > (17 - 5)) ? len - (17 - 5) : 0;  // limit to last 'n' chars
 
+#ifdef ENABLE_DTMF_CALLING
                 if (gScreenToDisplay != DISPLAY_MAIN ||
                     gDTMF_CallState != DTMF_CALL_STATE_NONE)
                     return;
+#endif
 
                 center_line = CENTER_LINE_DTMF_DEC;
 

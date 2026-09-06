@@ -20,9 +20,24 @@ OBFUSCATION = [
 def obfuscate(fw):
     return bytes([a^b for a, b in zip(fw, cycle(OBFUSCATION))])
 
+# Flash budget for the firmware image itself, in bytes.
+# Must match the FLASH region LENGTH in firmware.ld -- keep the two in step.
+FLASH_LIMIT = 60 * 1024
+
 plain = open(sys.argv[1], 'rb').read()
 if len(sys.argv[2]) > 10:
     print('Version suffix is too big!')
+    sys.exit(1)
+
+# The packed file adds a 16 byte version block and a 2 byte CRC, neither of
+# which lands in flash, so the budget is checked against the raw image.
+used = len(plain)
+free = FLASH_LIMIT - used
+print(f'Flash: {used:,} of {FLASH_LIMIT:,} bytes used '
+      f'({100.0 * used / FLASH_LIMIT:.1f}%), {free:,} free')
+
+if used > FLASH_LIMIT:
+    print(f'Firmware is {-free:,} bytes over the flash limit, not packing!')
     sys.exit(1)
 
 version = b'*OEFW-' + bytes(sys.argv[2], 'ascii')
@@ -37,4 +52,3 @@ digest = crc.digest()
 digest = bytes([digest[1], digest[0]])
 
 open(sys.argv[3], 'wb').write(packed + digest)
-
