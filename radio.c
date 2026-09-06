@@ -55,6 +55,8 @@ const char gModulationStr[MODULATION_UKNOWN][4] = {
         [MODULATION_FM]="FM",
         [MODULATION_AM]="AM",
         [MODULATION_USB]="USB",
+        [MODULATION_CWU]="CWU",
+        [MODULATION_CWL]="CWL",
 
 #ifdef ENABLE_BYP_RAW_DEMODULATORS
         [MODULATION_BYP]="BYP",
@@ -613,7 +615,7 @@ void RADIO_SetupRegisters(bool switchToForeground) {
 #else
     Frequency = gRxVfo->pRX->Frequency;
 #endif
-    BK4819_SetFrequency(Frequency);
+    BK4819_SetFrequency(Frequency + RADIO_CwOffset(gRxVfo->Modulation));
 
     BK4819_SetupSquelch(
             gRxVfo->SquelchOpenRSSIThresh, gRxVfo->SquelchCloseRSSIThresh,
@@ -874,6 +876,23 @@ void RADIO_SetTxParameters(void) {
     }
 }
 
+// CW has no demodulator of its own on the BK4819 -- it is received on the SSB
+// path with the RX tuned off the carrier by the pitch, so the signal lands in
+// the audio passband as a tone. CWU tunes below the carrier (tone = +pitch),
+// CWL tunes above it. Frequencies are in 10 Hz units, so 70 == 700 Hz.
+#define CW_PITCH 70
+
+int16_t RADIO_CwOffset(ModulationMode_t modulation) {
+    switch (modulation) {
+        case MODULATION_CWU:
+            return -CW_PITCH;
+        case MODULATION_CWL:
+            return CW_PITCH;
+        default:
+            return 0;
+    }
+}
+
 void RADIO_SetModulation(ModulationMode_t modulation) {
     BK4819_AF_Type_t mod;
     switch (modulation) {
@@ -885,6 +904,8 @@ void RADIO_SetModulation(ModulationMode_t modulation) {
             mod = BK4819_AF_AM;
             break;
         case MODULATION_USB:
+        case MODULATION_CWU:
+        case MODULATION_CWL:
             mod = BK4819_AF_BASEBAND2;
             break;
 
@@ -902,7 +923,7 @@ void RADIO_SetModulation(ModulationMode_t modulation) {
 
 
     BK4819_SetRegValue(afDacGainRegSpec, 0xF);
-    BK4819_WriteRegister(BK4819_REG_3D, modulation == MODULATION_USB ? 0 : 0x2AAB);
+    BK4819_WriteRegister(BK4819_REG_3D, IS_SSB_MODE(modulation) ? 0 : 0x2AAB);
     BK4819_SetRegValue(afcDisableRegSpec, modulation != MODULATION_FM);
 
     RADIO_SetupAGC(modulation == MODULATION_AM, false);

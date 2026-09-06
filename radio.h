@@ -59,6 +59,8 @@ typedef enum {
     MODULATION_FM,
     MODULATION_AM,
     MODULATION_USB,
+    MODULATION_CWU,
+    MODULATION_CWL,
 
 #ifdef ENABLE_BYP_RAW_DEMODULATORS
     MODULATION_BYP,
@@ -67,6 +69,9 @@ typedef enum {
 
     MODULATION_UKNOWN
 } ModulationMode_t;
+
+// CW rides on the SSB demodulator; these all need the same BK4819 setup
+#define IS_SSB_MODE(m) ((m) == MODULATION_USB || (m) == MODULATION_CWU || (m) == MODULATION_CWL)
 
 extern const char gModulationStr[MODULATION_UKNOWN][4];
 
@@ -161,6 +166,7 @@ void RADIO_ConfigureNOAA(void);
 #endif
 void     RADIO_SetTxParameters(void);
 void     RADIO_SetModulation(ModulationMode_t modulation);
+int16_t  RADIO_CwOffset(ModulationMode_t modulation);
 void     RADIO_SetVfoState(VfoState_t State);
 void     RADIO_PrepareTX(void);
 void     RADIO_SendCssTail(void);
