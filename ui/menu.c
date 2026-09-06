@@ -547,6 +547,9 @@ const t_sidefunction *gSubMenu_SIDEFUNCTIONS = SIDEFUNCTIONS;
 const uint8_t gSubMenu_SIDEFUNCTIONS_size = ARRAY_SIZE(SIDEFUNCTIONS);
 #endif
 
+// Derived from the table itself so it tracks the ENABLE_* guards in MenuList[]
+const uint8_t gMenuListSize = ARRAY_SIZE(MenuList);
+
 bool gIsInSubMenu;
 uint8_t gMenuCursor;
 
