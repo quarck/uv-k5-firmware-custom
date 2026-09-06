@@ -17,6 +17,10 @@ SsbMode currentSsbMode;
  uint16_t divider = 1000;
 
 SI47XX_MODE si4732mode = SI47XX_FM;
+
+// The SSB patch only implements AM/LSB/USB. CW is a firmware-level mode that
+// rides one of the sidebands, so the real sideband is tracked separately.
+static SI47XX_MODE cwSideband = SI47XX_USB;
 uint16_t siCurrentFreq = 10210;
 
 void SI47XX_ReadBuffer(uint8_t *buf, uint8_t size) {
@@ -34,7 +38,17 @@ void SI47XX_WriteBuffer(uint8_t *buf, uint8_t size) {
 }
 
 bool SI47XX_IsSSB() {
-  return si4732mode == SI47XX_USB || si4732mode == SI47XX_LSB;
+  return si4732mode == SI47XX_USB || si4732mode == SI47XX_LSB ||
+         si4732mode == SI47XX_CW;
+}
+
+// The sideband actually programmed into the chip for the current mode.
+SI47XX_MODE SI47XX_GetSsbSideband() {
+  return si4732mode == SI47XX_CW ? cwSideband : si4732mode;
+}
+
+void SI47XX_ToggleCwSideband() {
+  cwSideband = (cwSideband == SI47XX_USB) ? SI47XX_LSB : SI47XX_USB;
 }
 
 void waitToSend() {
@@ -197,9 +211,6 @@ void SI47XX_SsbSetup(SI47XX_SsbFilterBW AUDIOBW, uint8_t SBCUTFLT,
 
 bool SI47XX_downloadPatch() {
     uint8_t buf[248];
-//    const uint8_t PAGE_SIZE = SETTINGS_GetPageSize();
-    const uint32_t EEPROM_SIZE = 262144;
-    const uint32_t PATCH_START = EEPROM_SIZE - PATCH_SIZE;
     for (uint16_t offset = 0; offset < PATCH_SIZE; offset += 248) {
         uint32_t eepromN = PATCH_SIZE - offset > 248 ? 248 : PATCH_SIZE - offset;
         EEPROM_ReadBuffer(PATCH_START + offset, buf, eepromN);
@@ -279,8 +290,13 @@ void SI47XX_PowerDown() {
 void SI47XX_SwitchMode(SI47XX_MODE mode) {
     if (si4732mode != mode) {
         bool wasSSB = SI47XX_IsSSB();
+        // entering CW keeps whichever sideband was already in use
+        if (mode == SI47XX_CW &&
+            (si4732mode == SI47XX_USB || si4732mode == SI47XX_LSB)) {
+            cwSideband = si4732mode;
+        }
         si4732mode = mode;
-        if (mode == SI47XX_USB || mode == SI47XX_LSB) {
+        if (mode == SI47XX_USB || mode == SI47XX_LSB || mode == SI47XX_CW) {
             if (!wasSSB) {
                 SI47XX_PowerDown();
                 SI47XX_PatchPowerUp();
@@ -312,7 +328,7 @@ void SI47XX_SetFreq(uint16_t freq) {
 
   if (SI47XX_IsSSB()) {
     cmd[0] = CMD_AM_TUNE_FREQ; // same as AM 0x40
-    if (si4732mode == SI47XX_USB) {
+    if (SI47XX_GetSsbSideband() == SI47XX_USB) {
       cmd[1] = 0b10000000;
     } else {
       cmd[1] = 0b01000000;

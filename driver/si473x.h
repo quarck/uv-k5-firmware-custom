@@ -562,6 +562,8 @@ void SI47XX_ReadRDS(uint8_t buf[13]);
 void SI47XX_SwitchMode(SI47XX_MODE mode);
 
 bool SI47XX_IsSSB();
+SI47XX_MODE SI47XX_GetSsbSideband();
+void SI47XX_ToggleCwSideband();
 
 void RSQ_GET();
 
@@ -601,7 +603,12 @@ extern RSQStatus rsqStatus;
 extern uint16_t siCurrentFreq;
 extern uint16_t divider;
 
-#define PATCH_SIZE 15832
+// SSB patch extracted from CEC_051.HF and written to EEPROM by k5eeprom.py.
+// 1105 rows of 8 bytes (0x15/0x16 command byte + 7 payload).
+// PATCH_START must stay below 64 KB: that is all the 0x051B/0x051D UART
+// commands can address, so it is also all k5eeprom.py can write.
+#define PATCH_START 0x3000
+#define PATCH_SIZE  8840
 
 
 #define SI4732_FREQ_ADD 0X01FE0

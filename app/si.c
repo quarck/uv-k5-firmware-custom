@@ -202,7 +202,9 @@ static uint8_t seeking_way = 0;
 
 
 static void resetBFO() {
-        bfo = 0;
+        // In CW the carrier is parked at the pitch so it beats audibly.
+        // Shares gEeprom.CW_PITCH with the main band (stored in 10 Hz units).
+        bfo = (si4732mode == SI47XX_CW) ? (int16_t)(gEeprom.CW_PITCH * 10) : 0;
         SI47XX_SetBFO(bfo);
 
 }
@@ -239,7 +241,10 @@ void SI4732_Display() {
         UI_DisplayFrequency(String, 64 - strlen(String) * 13 / 2, 2, false);
         //模式显示
         const uint8_t BASE = 38;
-        GUI_DisplaySmallest(SI47XX_MODE_NAMES[si4732mode], LCD_WIDTH - 12, BASE - 10 - 8, false, true);
+        GUI_DisplaySmallest(si4732mode == SI47XX_CW
+                                ? (SI47XX_GetSsbSideband() == SI47XX_USB ? "CWU" : "CWL")
+                                : SI47XX_MODE_NAMES[si4732mode],
+                            LCD_WIDTH - 12, BASE - 10 - 8, false, true);
 
 
         if (SI47XX_IsSSB()) {
@@ -494,6 +499,14 @@ void SI_key(KEY_Code_t key, bool KEY_TYPE1, bool KEY_TYPE2, bool KEY_TYPE3, KEY_
     //                    tune(711300);
                         step = 1;
                     }
+                    else if (si4732mode == SI47XX_LSB ||
+                             si4732mode == SI47XX_USB) {
+                        // CW keeps the current sideband and narrows the filter
+                        SI47XX_SwitchMode(SI47XX_CW);
+                        ssbBw = SI47XX_SSB_BW_0_5_kHz;
+                        SI47XX_SetSsbBandwidth(ssbBw);
+                        step = 1;
+                    }
 #endif
 
                 else {
@@ -508,6 +521,11 @@ void SI_key(KEY_Code_t key, bool KEY_TYPE1, bool KEY_TYPE2, bool KEY_TYPE3, KEY_
 #ifdef ENABLE_4732SSB
 
                 case KEY_F:
+                    if (si4732mode == SI47XX_CW) {
+                        SI47XX_ToggleCwSideband();
+                        tune(Read_FreqSaved()); // re-apply the sideband
+                        return ;
+                    }
                     if (SI47XX_IsSSB()) {
                         uint32_t tmpF;
                         SI47XX_SwitchMode(si4732mode == SI47XX_LSB ? SI47XX_USB : SI47XX_LSB);

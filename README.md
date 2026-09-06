@@ -227,7 +227,7 @@ You can customize the firmware by enabling/disabling various compilation options
 
 ## Building
 
-Install necessary toolset:
+Install the toolchain:
 
 ```
 sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi python3-crcmod
@@ -238,3 +238,77 @@ then just:
 ```
 make build <PARAM1>=<value1> <PARAM2>=<value2>...
 ```
+
+With no parameters this builds the configuration set at the top of `Makefile`.
+Any `ENABLE_*` flag can be overridden on the command line, e.g.
+`make build ENABLE_SPECTRUM=0`.
+
+Two files are produced:
+
+| File | Use |
+|---|---|
+| `firmware.bin` | raw image, for SWD/OpenOCD |
+| `LOSEHU132*.bin` | packed image, for the uploader tools below |
+
+The packed name follows the enabled features (`E` = English, `S` = SI4732).
+
+### Flash budget
+
+The firmware must fit in **61,440 bytes** (60K — the top 4K of flash belongs to
+the stock bootloader; see `firmware.ld`). `fw-pack.py` prints usage on every
+build:
+
+```
+Flash: 56,272 of 61,440 bytes used (91.6%), 5,168 free
+```
+
+Going over is a hard link error (`region FLASH overflowed by N bytes`), so an
+oversized configuration can never produce a `.bin`.
+
+## Flashing the firmware
+
+Put the radio into flashing mode — hold **PTT** while switching it on — and:
+
+```
+k5tool -wrflash LOSEHU132ES.bin
+```
+
+[K5Web](https://k5.vicicode.com/) can do the same from a browser.
+
+## Flashing the SI4732 SSB patch (separate, one-time step)
+
+**Flashing the firmware alone is not enough for SSB.** The Si4732 has no SSB
+demodulator in ROM — SSB exists only as a Silicon Labs firmware patch that must
+be uploaded into the chip's RAM at every power-up. The patch is far too large to
+sit in the 60K firmware image, so it lives in EEPROM and the firmware streams it
+to the chip whenever SSB mode is entered.
+
+If the patch is missing or in the wrong place, **AM and FM work normally and SSB
+is silent** — the upload fails without any error.
+
+The patch shipped here (`ssb_patch_8byte.bin`, 8840 bytes = 1105 rows of 8) was
+extracted from the `CEC_051.HF` firmware, which embeds it in flash rather than
+EEPROM. Write it once with:
+
+```
+python k5eeprom.py write 0x3000 ssb_patch_8byte.bin
+```
+
+The write verifies itself by reading everything back. To re-check later:
+
+```
+python k5eeprom.py verify 0x3000 ssb_patch_8byte.bin
+```
+
+The address and length **must** match `PATCH_START` and `PATCH_SIZE` in
+`driver/si473x.h`. `0x3000` sits in the GB2312 font region, which is unused when
+`ENABLE_CHINESE_FULL = 0`; a Chinese build would need the patch placed elsewhere.
+
+### Why not k5tool
+
+`k5tool -wree` is limited to the stock 8 KB EEPROM and rejects any offset at or
+above `0x2000`. The radio itself is not so limited: the `0x051B`/`0x051D` UART
+commands carry a 16-bit offset, so anything below 64 KB is reachable.
+`k5eeprom.py` speaks that protocol directly. It cannot go above 64 KB either —
+the 32-bit variants (`0x052B`/`0x0538`) are compiled out unless
+`ENABLE_CHINESE_FULL == 4`.
