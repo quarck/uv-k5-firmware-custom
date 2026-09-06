@@ -59,8 +59,8 @@ typedef enum {
     MODULATION_FM,
     MODULATION_AM,
     MODULATION_USB,
-    MODULATION_CWU,
-    MODULATION_CWL,
+    MODULATION_CW,
+    MODULATION_CWF,
 
 #ifdef ENABLE_BYP_RAW_DEMODULATORS
     MODULATION_BYP,
@@ -71,7 +71,7 @@ typedef enum {
 } ModulationMode_t;
 
 // CW rides on the SSB demodulator; these all need the same BK4819 setup
-#define IS_SSB_MODE(m) ((m) == MODULATION_USB || (m) == MODULATION_CWU || (m) == MODULATION_CWL)
+#define IS_SSB_MODE(m) ((m) == MODULATION_USB || (m) == MODULATION_CW)
 
 extern const char gModulationStr[MODULATION_UKNOWN][4];
 

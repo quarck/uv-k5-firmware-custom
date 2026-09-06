@@ -76,6 +76,7 @@ const t_menu_item MenuList[] =
                 {/*"TxTOut",*/ VOICE_ID_TRANSMIT_OVER_TIME, MENU_TOT, 发送超时}, // was "TOT"
                 {/*"BatSav",*/ VOICE_ID_SAVE_MODE, MENU_SAVE, 省电模式}, // was "SAVE"
                 {/*"Mic",*/    VOICE_ID_INVALID, MENU_MIC, 麦克风增益},
+                {/*"CWTone",*/ VOICE_ID_INVALID, MENU_CWPITCH, CW音调},
                 {/*"ChDisp",*/ VOICE_ID_INVALID, MENU_MDF, 信道显示模式}, // was "MDF"
 #if ENABLE_CHINESE_FULL == 4
                 {/*"POnMsg",*/ VOICE_ID_INVALID,                       MENU_PONMSG        ,开机显示},
@@ -702,6 +703,10 @@ void UI_DisplayMenu(void) {
     switch (UI_MENU_GetCurrentMenuId()) {
         case MENU_SQL:
             sprintf(String, "%d", gSubMenuSelection);
+            break;
+
+        case MENU_CWPITCH:    // stored in 10 Hz units, shown in Hz
+            sprintf(String, "%dHz", gSubMenuSelection * 10);
             break;
 
         case MENU_MIC: {    // display the mic gain in actual dB rather than just an index number

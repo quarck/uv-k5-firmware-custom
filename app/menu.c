@@ -365,6 +365,11 @@ int MENU_GetLimits(uint8_t menu_id, int32_t *pMin, int32_t *pMax) {
             *pMax = ARRAY_SIZE(gSubMenu_SAVE) - 1;
             break;
 
+        case MENU_CWPITCH:
+            *pMin = 0;
+            *pMax = 119;
+            break;
+
         case MENU_MIC:
             *pMin = 0;
             *pMax = 4;
@@ -681,6 +686,11 @@ void MENU_AcceptSetting(void) {
 
         case MENU_RP_STE:
             gEeprom.REPEATER_TAIL_TONE_ELIMINATION = gSubMenuSelection;
+            break;
+
+        case MENU_CWPITCH:
+            gEeprom.CW_PITCH = gSubMenuSelection;
+            gFlagReconfigureVfos = true;
             break;
 
         case MENU_MIC:
@@ -1084,6 +1094,10 @@ void MENU_ShowCurrentSetting(void) {
 
         case MENU_RP_STE:
             gSubMenuSelection = gEeprom.REPEATER_TAIL_TONE_ELIMINATION;
+            break;
+
+        case MENU_CWPITCH:
+            gSubMenuSelection = gEeprom.CW_PITCH;
             break;
 
         case MENU_MIC:

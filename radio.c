@@ -55,8 +55,8 @@ const char gModulationStr[MODULATION_UKNOWN][4] = {
         [MODULATION_FM]="FM",
         [MODULATION_AM]="AM",
         [MODULATION_USB]="USB",
-        [MODULATION_CWU]="CWU",
-        [MODULATION_CWL]="CWL",
+        [MODULATION_CW]="CW",
+        [MODULATION_CWF]="CWF",
 
 #ifdef ENABLE_BYP_RAW_DEMODULATORS
         [MODULATION_BYP]="BYP",
@@ -877,20 +877,14 @@ void RADIO_SetTxParameters(void) {
 }
 
 // CW has no demodulator of its own on the BK4819 -- it is received on the SSB
-// path with the RX tuned off the carrier by the pitch, so the signal lands in
-// the audio passband as a tone. CWU tunes below the carrier (tone = +pitch),
-// CWL tunes above it. Frequencies are in 10 Hz units, so 70 == 700 Hz.
-#define CW_PITCH 70
+// path with the RX tuned below the carrier by the pitch, so the signal lands in
+// the audio passband as a tone. There is only one CW mode: the chip has no
+// sideband selection, so tuning the other way sounds identical (verified on air).
+// Frequencies are in 10 Hz units, so a pitch of 70 == 700 Hz.
+// CWF is deliberately absent here -- it uses the FM discriminator, not this path.
 
 int16_t RADIO_CwOffset(ModulationMode_t modulation) {
-    switch (modulation) {
-        case MODULATION_CWU:
-            return -CW_PITCH;
-        case MODULATION_CWL:
-            return CW_PITCH;
-        default:
-            return 0;
-    }
+    return modulation == MODULATION_CW ? -(int16_t)gEeprom.CW_PITCH : 0;
 }
 
 void RADIO_SetModulation(ModulationMode_t modulation) {
@@ -898,14 +892,14 @@ void RADIO_SetModulation(ModulationMode_t modulation) {
     switch (modulation) {
         default:
         case MODULATION_FM:
+        case MODULATION_CWF:  // CW through the FM discriminator, no pitch offset
             mod = BK4819_AF_FM;
             break;
         case MODULATION_AM:
             mod = BK4819_AF_AM;
             break;
         case MODULATION_USB:
-        case MODULATION_CWU:
-        case MODULATION_CWL:
+        case MODULATION_CW:
             mod = BK4819_AF_BASEBAND2;
             break;
 

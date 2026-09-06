@@ -207,6 +207,7 @@ typedef struct {
     uint8_t               KEY_2_LONG_PRESS_ACTION;
 #endif
     uint8_t               MIC_SENSITIVITY;
+    uint8_t               CW_PITCH;          // CW beat note, 10 Hz units (0..119)
     uint8_t               MIC_SENSITIVITY_TUNING;
     uint8_t               CHAN_1_CALL;
 #ifdef ENABLE_DTMF_CALLING

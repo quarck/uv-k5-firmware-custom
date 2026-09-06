@@ -5,6 +5,8 @@
 #ifndef UV_K5_FIRMWARE_CUSTOM_0_17_CHINESE_H
 #define UV_K5_FIRMWARE_CUSTOM_0_17_CHINESE_H
 #include "font.h"
+// ASCII label, valid in every language build
+#define CW音调 "CWTone"
 #if ENABLE_CHINESE_FULL!=4 || defined(ENABLE_ENGLISH)
 #ifdef ENABLE_ENGLISH
 #define 步进频率 "Step"
