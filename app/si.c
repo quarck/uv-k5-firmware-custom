@@ -58,7 +58,16 @@ static const char SI47XX_MODE_NAMES[5][4] = {
 };
 
 static SI47XX_FilterBW bw = SI47XX_BW_6_kHz;
+// SSB and CW keep separate filter widths: CW wants a narrow one, and entering
+// CW must not overwrite whatever the operator chose for voice.
 static SI47XX_SsbFilterBW ssbBw = SI47XX_SSB_BW_3_kHz;
+static SI47XX_SsbFilterBW cwBw = SI47XX_SSB_BW_0_5_kHz;
+// Which sideband to come back to when SSB is re-entered from another mode.
+static SI47XX_MODE lastSideband = SI47XX_LSB;
+
+static SI47XX_SsbFilterBW *activeSsbBw(void) {
+    return (si4732mode == SI47XX_CW) ? &cwBw : &ssbBw;
+}
 static int8_t currentBandIndex = -1;
 bool SNR_flag = true;
 bool SI_run = true;
@@ -171,7 +180,8 @@ static void tune(uint32_t f) {
             return;
         }
     }
-    EEPROM_WriteBuffer(SI4732_FREQ_ADD + si4732mode * 4, (uint8_t * ) & f, 4);
+    EEPROM_WriteBuffer(SI4732_FREQ_ADD + SI4732_FREQ_SLOT(si4732mode) * 4,
+                       (uint8_t * ) & f, 4);
 
     f /= divider;
     if (si4732mode == SI47XX_FM) {
@@ -276,7 +286,7 @@ void SI4732_Display() {
         if (si4732mode == SI47XX_FM) {
             sprintf(String, "STP %u ATT %u", step, att);
         } else if (SI47XX_IsSSB()) {
-            sprintf(String, "STP %u ATT %u BW %s", step, att, SI47XX_SSB_BW_NAMES[ssbBw]);
+            sprintf(String, "STP %u ATT %u BW %s", step, att, SI47XX_SSB_BW_NAMES[*activeSsbBw()]);
         } else {
             sprintf(String, "STP %u ATT %u BW %s", step, att, SI47XX_BW_NAMES[bw]);
         }
@@ -455,12 +465,13 @@ void SI_key(KEY_Code_t key, bool KEY_TYPE1, bool KEY_TYPE2, bool KEY_TYPE3, KEY_
 #ifdef ENABLE_4732SSB
 
                 if (SI47XX_IsSSB()) {
-                                    if (ssbBw == SI47XX_SSB_BW_1_0_kHz) {
-                                        ssbBw = SI47XX_SSB_BW_1_2_kHz;
+                                    SI47XX_SsbFilterBW *p = activeSsbBw();
+                                    if (*p == SI47XX_SSB_BW_1_0_kHz) {
+                                        *p = SI47XX_SSB_BW_1_2_kHz;
                                     } else {
-                                        ssbBw++;
+                                        (*p)++;
                                     }
-                                    SI47XX_SetSsbBandwidth(ssbBw);
+                                    SI47XX_SetSsbBandwidth(*p);
                                 } else {
 #endif
                 if (bw == SI47XX_BW_1_kHz) {
@@ -494,17 +505,17 @@ void SI_key(KEY_Code_t key, bool KEY_TYPE1, bool KEY_TYPE2, bool KEY_TYPE3, KEY_
 
                     else if (si4732mode == SI47XX_AM) {
 
-                        SI47XX_SwitchMode(SI47XX_LSB);
+                        SI47XX_SwitchMode(lastSideband);
                         SI47XX_SetSsbBandwidth(ssbBw);
     //                    tune(711300);
                         step = 1;
                     }
                     else if (si4732mode == SI47XX_LSB ||
                              si4732mode == SI47XX_USB) {
-                        // CW keeps the current sideband and narrows the filter
+                        // CW keeps the current sideband and has its own filter
+                        lastSideband = si4732mode;
                         SI47XX_SwitchMode(SI47XX_CW);
-                        ssbBw = SI47XX_SSB_BW_0_5_kHz;
-                        SI47XX_SetSsbBandwidth(ssbBw);
+                        SI47XX_SetSsbBandwidth(cwBw);
                         step = 1;
                     }
 #endif
@@ -528,7 +539,8 @@ void SI_key(KEY_Code_t key, bool KEY_TYPE1, bool KEY_TYPE2, bool KEY_TYPE3, KEY_
                     }
                     if (SI47XX_IsSSB()) {
                         uint32_t tmpF;
-                        SI47XX_SwitchMode(si4732mode == SI47XX_LSB ? SI47XX_USB : SI47XX_LSB);
+                        lastSideband = (si4732mode == SI47XX_LSB) ? SI47XX_USB : SI47XX_LSB;
+                        SI47XX_SwitchMode(lastSideband);
                         tune(Read_FreqSaved()); // to apply SSB
                         return ;
                     }
@@ -607,7 +619,8 @@ void SI4732_Main() {
             bool valid = false;
             siCurrentFreq = SI47XX_getFrequency(&valid);
             uint32_t f = siCurrentFreq * divider;
-            EEPROM_WriteBuffer(SI4732_FREQ_ADD + si4732mode * 4, (uint8_t * ) & f, 4);
+            EEPROM_WriteBuffer(SI4732_FREQ_ADD + SI4732_FREQ_SLOT(si4732mode) * 4,
+                               (uint8_t * ) & f, 4);
 
             if (valid) {
                 seeking = false;

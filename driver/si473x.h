@@ -612,6 +612,10 @@ extern uint16_t divider;
 
 
 #define SI4732_FREQ_ADD 0X01FE0
+// FM tunes a different part of the spectrum and keeps its own dial.
+// AM, LSB, USB and CW all tune 150 kHz - 30 MHz and share one frequency,
+// so changing demodulation mode does not move the VFO.
+#define SI4732_FREQ_SLOT(m) ((m) == SI47XX_FM ? 0u : 1u)
 
 
 
