@@ -147,6 +147,11 @@ functions:
 | 0x26B00~0X2A330                        | **Chinese Input Method** - Pinyin Chinese character table                                                                                               |
 | 0x3C228~0x40000                        | **SI4732**-patch，Length 0x3DD8，used to update SI4732 firmware                                                                                           |
 | 0x3C210~0x3C21C                        | **SI4732**FM、AM、SSB Freq、Mode                                                                                                                           |
+
+> **The frequency-store row above does not apply to this fork** — it lives at
+> `0x1FE0`/`0x1FE4`. The SSB patch is at the documented `0x3C228`, but is 8840
+> bytes rather than 0x3DD8. See [EEPROM map for this fork](#eeprom-map-for-this-fork).
+
 [Doppler Eeprom Layout Explanation](https://github.com/losehu/uv-k5-firmware-chinese/blob/main/doc/多普勒eeprom详细说明.txt)
 
 # Examples
@@ -300,21 +305,34 @@ bootloader reads one byte at `0x1FF0` and enters flash mode when it is `2`
 
 [K5Web](https://k5.vicicode.com/) can also flash from a browser.
 
-### EEPROM addresses used by the bootloader
+### EEPROM map for this fork
 
-Worth knowing before allocating EEPROM in the firmware:
+Where this fork actually puts things, which differs from the upstream layout above:
 
-| Address | Use |
-|---|---|
-| `0x1FF0` | bootloader boot mode (`2` = flash mode) |
-| `0x1FF8`-`0x1FFC` | side key functions |
+| Address | Size | Use |
+|---|---|---|
+| `0x0E93` | 1 | CW pitch (`CWTone` menu item, 10 Hz units) |
+| `0x1FE0`-`0x1FE3` | 4 | SI4732 frequency, FM |
+| `0x1FE4`-`0x1FE7` | 4 | SI4732 frequency, shared by AM/LSB/USB/CW |
+| `0x1FF0` | 1 | **bootloader** boot mode (`2` = flash mode) |
+| `0x1FF8`-`0x1FFC` | 5 | side key functions |
+| `0x3C228`-`0x3E4AF` | 8840 | **SI4732 SSB patch** (see below) |
 
-`settings.c` contains a `SETTINGS_WriteBuildOptions()` that writes 8 bytes at
-`0x1FF0`. It is currently **never called**; wiring it up would overwrite the
-bootloader's boot-mode flag, so leave it alone or move it elsewhere.
+The patch sits at the upstream address `0x3C228`, defined by `PATCH_START` in
+`driver/si473x.h`. That is above 64 KB, so writing it needs the 32-bit
+`0x052B`/`0x0538` UART commands — which exist only when the firmware is built
+with **`ENABLE_EEPROM_32BIT = 1`** (the default here). `k5eeprom.py` picks the
+32-bit commands automatically for any address past 64 KB.
 
-The SI4732 frequency store sits at `0x1FE0` (FM) and `0x1FE4` (AM/SSB/CW),
-clear of both.
+Two hazards worth knowing:
+
+`settings.c` has a `SETTINGS_WriteBuildOptions()` that writes 8 bytes at `0x1FF0`.
+It is currently **never called**; wiring it up would land on the bootloader's
+boot-mode flag, and a value of `2` there makes the radio boot into flash mode.
+
+Writing above 64 KB requires `ENABLE_EEPROM_32BIT = 1`. With it set to `0` the
+radio simply ignores `0x052B`/`0x0538`, and `k5eeprom.py` will time out rather
+than report anything useful.
 
 ## Flashing the SI4732 SSB patch (separate, one-time step)
 

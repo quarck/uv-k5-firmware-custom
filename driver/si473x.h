@@ -605,9 +605,10 @@ extern uint16_t divider;
 
 // SSB patch extracted from CEC_051.HF and written to EEPROM by k5eeprom.py.
 // 1105 rows of 8 bytes (0x15/0x16 command byte + 7 payload).
-// PATCH_START must stay below 64 KB: that is all the 0x051B/0x051D UART
-// commands can address, so it is also all k5eeprom.py can write.
-#define PATCH_START 0x3000
+// This is the upstream location (documented as 0x3C228..0x40000). It is above
+// 64 KB, so writing it needs the 32-bit 0x052B/0x0538 UART commands, which
+// require ENABLE_EEPROM_32BIT=1 in the Makefile.
+#define PATCH_START 0x3C228
 #define PATCH_SIZE  8840
 
 

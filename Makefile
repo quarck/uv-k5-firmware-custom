@@ -73,6 +73,9 @@ ENABLE_4732 =1
 ENABLE_4732SSB =1
 
 ENABLE_DOPPLER               =0
+
+PORT    ?= /dev/ttyUSB1
+
 #############################################################
 PACKED_FILE_SUFFIX = QRCK
 ifeq ($(ENABLE_PINYIN),1)
@@ -127,7 +130,6 @@ endif
 
 
 
-OPENOCD = C:/OpenOCD-20240916-0.12.0/bin/openocd.exe
 TARGET = firmware
 
 ifeq ($(ENABLE_CLANG),1)
@@ -638,11 +640,13 @@ all:
 	$(MAKE) build
 	$(MAKE) flash
 
-debug:
-	$(OPENOCD) -c "bindto 0.0.0.0" -f interface/stlink.cfg -f dp32g030.cfg
-
 flash:
-	$(OPENOCD) -c "bindto 0.0.0.0" -f interface/stlink.cfg -f dp32g030.cfg -c "write_image firmware.bin 0; shutdown;"
+	python k5flash.py --port $(PORT) QRCKES.bin
+
+flashrom:
+	python k5eeprom.py --port $(PORT) write 0x3C228 ssb_patch_8byte.bin
+
+flashall: flash flashrom
 
 version.o: .FORCE
 
