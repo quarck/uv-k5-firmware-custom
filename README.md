@@ -267,13 +267,54 @@ oversized configuration can never produce a `.bin`.
 
 ## Flashing the firmware
 
-Put the radio into flashing mode — hold **PTT** while switching it on — and:
+This radio runs [losehu's custom bootloader](https://github.com/losehu/uv-k5-bootloader-custom),
+whose flash protocol is **not** the stock Quansheng one. `k5tool -wrflash` only
+speaks the stock protocol and will not work. Use the bundled `k5flash.py`:
 
 ```
-k5tool -wrflash LOSEHU132ES.bin
+python k5flash.py QRCKES.bin        # or firmware.bin
 ```
 
-[K5Web](https://k5.vicicode.com/) can do the same from a browser.
+It accepts **either** the packed image (`QRCK*.bin`) or the raw build output
+(`firmware.bin`). The bootloader programs whatever bytes it is handed straight to
+flash, so a packed image is unpacked in memory first — CRC checked, de-obfuscated,
+and the 16-byte version block removed. The version string is printed so you can
+see what you are about to flash.
+
+Anything that is neither is refused before the erase, with the reason for both
+interpretations, rather than writing garbage to flash.
+
+Put the radio into flash mode first. The tool then:
+
+1. waits for the bootloader's `0x0518` beacon and prints its version
+2. erases the application area (`0x0530`)
+3. streams 256-byte blocks (`0x0519`), each one acknowledged
+4. the bootloader reboots itself after the final block
+
+Only flash pages 8-127 are erased. The bootloader itself is never touched, so an
+interrupted or failed run is always retryable — return to flash mode and re-run.
+
+Flash mode is selected by an **EEPROM flag, not a key combination**: the
+bootloader reads one byte at `0x1FF0` and enters flash mode when it is `2`
+(`main.c` in the bootloader source).
+
+[K5Web](https://k5.vicicode.com/) can also flash from a browser.
+
+### EEPROM addresses used by the bootloader
+
+Worth knowing before allocating EEPROM in the firmware:
+
+| Address | Use |
+|---|---|
+| `0x1FF0` | bootloader boot mode (`2` = flash mode) |
+| `0x1FF8`-`0x1FFC` | side key functions |
+
+`settings.c` contains a `SETTINGS_WriteBuildOptions()` that writes 8 bytes at
+`0x1FF0`. It is currently **never called**; wiring it up would overwrite the
+bootloader's boot-mode flag, so leave it alone or move it elsewhere.
+
+The SI4732 frequency store sits at `0x1FE0` (FM) and `0x1FE4` (AM/SSB/CW),
+clear of both.
 
 ## Flashing the SI4732 SSB patch (separate, one-time step)
 
