@@ -470,7 +470,7 @@ int edit_index;
 
 void UI_DisplayMenu(void) {
     const unsigned int menu_list_width = 6; // max no. of characters on the menu list (left side)
-    const unsigned int menu_item_x1 = (8 * menu_list_width);//+ 2;
+    const unsigned int menu_item_x1 = (8 * menu_list_width) + 2;
     const unsigned int menu_item_x2 = LCD_WIDTH - 1;
     unsigned int i;
     char String[64];  // bigger cuz we can now do multi-line in one string (use '\n' char)
@@ -481,83 +481,31 @@ void UI_DisplayMenu(void) {
     // clear the screen buffer
     UI_DisplayClear();
 
-#if 1
-    // original menu layout
+    // menu list: previous / current / next, big font, current one inverted
+    for (i = 0; i < 3; i++)
+        if (gMenuCursor > 0 || i > 0)
+            if ((gMenuListCount - 1) != gMenuCursor || i != 2)
+                UI_PrintString(MenuList[gMenuCursor + i - 1].name, 0, 0, i * 2, 8);
 
+    // invert the current menu list item
+    for (i = 0; i < (8 * menu_list_width); i++) {
+        gFrameBuffer[2][i] ^= 0xFF;
+        gFrameBuffer[3][i] ^= 0xFF;
+    }
 
+    // vertical separating dotted line
+    for (i = 0; i < 7; i++)
+        gFrameBuffer[i][(8 * menu_list_width) + 1] = 0xAA;
 
-    // invert the current menu list item pixels反转当前菜单项的像素值 ： (invert the pixels of the current menu item)
-
-
-    // draw vertical separating dotted line绘制垂直分隔的点线 ： (draw the vertical separating dotted line)
-//    for (i = 0; i < 7; i++)
-//        gFrameBuffer[i][(8 * menu_list_width) + 1] = 0xAA;
-
-
-    // draw the little sub-menu triangle marker绘制子菜单三角标志： (draw the sub-menu triangle marker)
-    //const void *BITMAP_CurrentIndicator = BITMAP_MARKER;
-
+    // sub-menu marker.  Line 0 of the value column is the only row nothing
+    // else draws on; line 2 carries centred channel strings that a long
+    // channel name would push left into the marker.
     if (gIsInSubMenu)
-        memmove(gFrameBuffer[2] + 41, BITMAP_VFO_Default, sizeof(BITMAP_VFO_Default));
+        memmove(gFrameBuffer[0] + menu_item_x1, BITMAP_VFO_Default, sizeof(BITMAP_VFO_Default));
+
+    // menu index number / count
     sprintf(String, "%2u/%u", 1 + gMenuCursor, gMenuListCount);
-
-
     UI_PrintStringSmall(String, 2, 0, 6);
-
-
-    {
-    uint8_t size_menu = strlen(MenuList[gMenuCursor].name)*7;
-    UI_PrintStringSmall(MenuList[gMenuCursor].name, size_menu < 48 ? (48 - size_menu) / 2 : 0, 0, 0);
-    }
-
-#else
-    {	// new menu layout .. experimental & unfinished
-
-        const int menu_index = gMenuCursor;  // current selected menu item
-        i = 1;
-
-        if (!gIsInSubMenu)
-        {
-            while (i < 2)
-            {	// leading menu items - small text
-                const int k = menu_index + i - 2;
-                if (k < 0)
-                    UI_PrintStringSmall(MenuList[gMenuListCount + k].name, 0, 0, i);  // wrap-a-round
-                else
-                if (k >= 0 && k < (int)gMenuListCount)
-                    UI_PrintStringSmall(MenuList[k].name, 0, 0, i);
-                i++;
-            }
-
-            // current menu item - keep big n fat
-            if (menu_index >= 0 && menu_index < (int)gMenuListCount)
-                UI_PrintStringSmall(MenuList[menu_index].name, 0, 0, 2);
-            i++;
-
-            while (i < 4)
-            {	// trailing menu item - small text
-                const int k = menu_index + i - 2;
-                if (k >= 0 && k < (int)gMenuListCount)
-                    UI_PrintStringSmall(MenuList[k].name, 0, 0, 1 + i);
-                else
-                if (k >= (int)gMenuListCount)
-                    UI_PrintStringSmall(MenuList[gMenuListCount - k].name, 0, 0, 1 + i);  // wrap-a-round
-                i++;
-            }
-
-            // draw the menu index number/count
-            sprintf(String, "%2u.%u", 1 + gMenuCursor, gMenuListCount);
-            UI_PrintStringSmall(String, 2, 0, 6);
-        }
-        else
-        if (menu_index >= 0 && menu_index < (int)gMenuListCount)
-        {	// current menu item
-
-            UI_PrintStringSmall(MenuList[menu_index].name, 0, 0, 0);
-//			UI_PrintStringSmall(String, 0, 0, 0);
-        }
-    }
-#endif
 
     // **************
 
@@ -739,15 +687,15 @@ void UI_DisplayMenu(void) {
             const bool valid = RADIO_CheckValidChannel(gSubMenuSelection, false, 1);
 
             UI_GenerateChannelStringEx(String, valid, gSubMenuSelection);
-            UI_PrintStringSmall(String, menu_item_x1 - 12, menu_item_x2, 2);
+            UI_PrintStringSmall(String, menu_item_x1, menu_item_x2, 2);
 
             if (valid && !gAskForConfirmation) {    // show the frequency so that the user knows the channels frequency
                 const uint32_t frequency = SETTINGS_FetchChannelFrequency(gSubMenuSelection);
                 sprintf(String, "%u.%05u", frequency / 100000, frequency % 100000);
-                UI_PrintStringSmall(String, menu_item_x1 - 12, menu_item_x2, 5);
+                UI_PrintStringSmall(String, menu_item_x1, menu_item_x2, 5);
             }
             SETTINGS_FetchChannelName(String, gSubMenuSelection);
-            UI_PrintStringSmall(String[0] ? String : "--", menu_item_x1 - 12, menu_item_x2, 3);
+            UI_PrintStringSmall(String[0] ? String : "--", menu_item_x1, menu_item_x2, 3);
             already_printed = true;
             break;
         }
@@ -757,7 +705,7 @@ void UI_DisplayMenu(void) {
 
             const bool valid = RADIO_CheckValidChannel(gSubMenuSelection, false, 1);
             UI_GenerateChannelStringEx(String, valid, gSubMenuSelection);
-            UI_PrintStringSmall(String, menu_item_x1 - 12, menu_item_x2, 2);
+            UI_PrintStringSmall(String, menu_item_x1, menu_item_x2, 2);
 
             if (valid) {
                 const uint32_t frequency = SETTINGS_FetchChannelFrequency(gSubMenuSelection);
@@ -770,7 +718,7 @@ void UI_DisplayMenu(void) {
                 if (edit_index < 0) {    // show the channel name
                     SETTINGS_FetchChannelName(String, gSubMenuSelection);
                     char *pPrintStr = String[0] ? String : "--";
-                    UI_PrintStringSmall(pPrintStr, menu_item_x1 - 12, menu_item_x2, 3);
+                    UI_PrintStringSmall(pPrintStr, menu_item_x1, menu_item_x2, 3);
 
                 }
 
@@ -778,7 +726,7 @@ void UI_DisplayMenu(void) {
                 else {
 
 
-                    UI_PrintStringSmall(edit, menu_item_x1 - 12, menu_item_x2, 3);
+                    UI_PrintStringSmall(edit, menu_item_x1, menu_item_x2, 3);
 
                     if (edit_index < MAX_EDIT_INDEX) {
 //#if ENABLE_CHINESE_FULL == 4
@@ -786,11 +734,11 @@ void UI_DisplayMenu(void) {
 //#endif
 
 
-                        gFrameBuffer[4][menu_item_x1 - 12 + 7 * edit_index +
-                                        (((menu_item_x2 - menu_item_x1 + 12) - (7 * MAX_EDIT_INDEX)) + 1) / 2 + 3] |=
+                        gFrameBuffer[4][menu_item_x1 + 7 * edit_index +
+                                        (((menu_item_x2 - menu_item_x1) - (7 * MAX_EDIT_INDEX)) + 1) / 2 + 3] |=
                                 3 << 6;
-                        gFrameBuffer[4][menu_item_x1 - 12 + 7 * edit_index +
-                                        (((menu_item_x2 - menu_item_x1 + 12) - (7 * MAX_EDIT_INDEX)) + 1) / 2 + 4] |=
+                        gFrameBuffer[4][menu_item_x1 + 7 * edit_index +
+                                        (((menu_item_x2 - menu_item_x1) - (7 * MAX_EDIT_INDEX)) + 1) / 2 + 4] |=
                                 3 << 6;
 
 
@@ -812,7 +760,7 @@ void UI_DisplayMenu(void) {
                     sprintf(String, "%u.%05u", frequency / 100000, frequency % 100000);
                     {
 //                        show_move_flag = 1;
-                        UI_PrintStringSmall(String, menu_item_x1 - 12, menu_item_x2, 5);
+                        UI_PrintStringSmall(String, menu_item_x1, menu_item_x2, 5);
                     }
                 }
             }
@@ -1086,7 +1034,7 @@ void UI_DisplayMenu(void) {
         }
 
         // channel number
-        UI_PrintStringSmall(pPrintStr, menu_item_x1 - 12, menu_item_x2, 2);
+        UI_PrintStringSmall(pPrintStr, menu_item_x1, menu_item_x2, 2);
 
         SETTINGS_FetchChannelName(String, gSubMenuSelection);
         pPrintStr = String[0] ? String : "--";
@@ -1094,19 +1042,19 @@ void UI_DisplayMenu(void) {
 
 // channel name and scan-list
         if (gSubMenuSelection < 0 || !gEeprom.SCAN_LIST_ENABLED[i]) {
-            UI_PrintStringSmall(pPrintStr, menu_item_x1 - 12, menu_item_x2, 4);
+            UI_PrintStringSmall(pPrintStr, menu_item_x1, menu_item_x2, 4);
         } else {
-            UI_PrintStringSmall(pPrintStr, menu_item_x1 - 12, menu_item_x2, 4);
+            UI_PrintStringSmall(pPrintStr, menu_item_x1, menu_item_x2, 4);
 
 //
 //            if (IS_MR_CHANNEL(gEeprom.SCANLIST_PRIORITY_CH1[i])) {
 //                sprintf(String, "PRI%d:%u", 1, gEeprom.SCANLIST_PRIORITY_CH1[i] + 1);
-//                UI_PrintStringSmall(String, menu_item_x1 - 12, menu_item_x2, 3);
+//                UI_PrintStringSmall(String, menu_item_x1, menu_item_x2, 3);
 //            }
 //
 //            if (IS_MR_CHANNEL(gEeprom.SCANLIST_PRIORITY_CH2[i])) {
 //                sprintf(String, "PRI%d:%u", 2, gEeprom.SCANLIST_PRIORITY_CH2[i] + 1);
-//                UI_PrintStringSmall(String, menu_item_x1 - 12, menu_item_x2, 6);
+//                UI_PrintStringSmall(String, menu_item_x1, menu_item_x2, 6);
 //            }
 
         }
@@ -1154,7 +1102,7 @@ void UI_DisplayMenu(void) {
         char *pPrintStr = (gAskForConfirmation == 1) ? "SURE?" : "WAIT!";
         if (UI_MENU_GetCurrentMenuId() == MENU_MEM_CH || UI_MENU_GetCurrentMenuId() == MENU_MEM_NAME ||
              UI_MENU_GetCurrentMenuId() == MENU_DEL_CH)
-            UI_PrintStringSmall(pPrintStr, menu_item_x1 - 12, menu_item_x2, 5);
+            UI_PrintStringSmall(pPrintStr, menu_item_x1, menu_item_x2, 5);
         else UI_PrintStringSmall(pPrintStr, menu_item_x1, menu_item_x2, 5);
 
         gRequestSaveSettings = 1;

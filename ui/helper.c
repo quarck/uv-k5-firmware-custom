@@ -89,6 +89,26 @@ void UI_GenerateChannelStringEx(char *pString, const bool bShowPrefix, const uin
 //    }
 //}
 
+// Big font (gFontBig): 7px glyphs spanning two framebuffer lines, drawn at
+// `Width` pixel pitch.  No bounds check - the caller must keep
+// Start + strlen * Width inside the line, and Line + 1 below FRAME_LINES.
+void UI_PrintString(const char *pString, uint8_t Start, uint8_t End, uint8_t Line, uint8_t Width) {
+    const size_t Length = strlen(pString);
+    size_t i;
+
+    if (End > Start)
+        Start += (((End - Start) - (Length * Width)) + 1) / 2;
+
+    for (i = 0; i < Length; i++) {
+        const unsigned int ofs = (unsigned int) Start + (i * Width);
+        if (pString[i] > ' ' && pString[i] < 127) {
+            const unsigned int index = (unsigned int) pString[i] - ' ' - 1;
+            memcpy(gFrameBuffer[Line + 0] + ofs, &gFontBig[index][0], 7);
+            memcpy(gFrameBuffer[Line + 1] + ofs, &gFontBig[index][7], 7);
+        }
+    }
+}
+
 void UI_PrintStringSmall(const char *pString, uint8_t Start, uint8_t End, uint8_t Line) {
 
     const size_t Length = strlen(pString);
