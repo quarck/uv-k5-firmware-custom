@@ -96,8 +96,10 @@ void     BK4819_SetupSquelch(
 void     BK4819_SetAF(BK4819_AF_Type_t AF);
 void     BK4819_RX_TurnOn(void);
 void     BK4819_PickRXFilterPathBasedOnFrequency(uint32_t Frequency);
+// Scrambling is not permitted on the amateur bands, so this firmware has no
+// way to switch it on -- the disable is kept and called wherever the chip's
+// state is (re)established, so REG_31 bit 1 is always known to be clear.
 void     BK4819_DisableScramble(void);
-void     BK4819_EnableScramble(uint8_t Type);
 
 bool     BK4819_CompanderEnabled(void);
 void     BK4819_SetCompander(const unsigned int mode);

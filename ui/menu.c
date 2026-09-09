@@ -63,7 +63,6 @@ const t_menu_item MenuList[] =
                 {/*"W/N",*/    VOICE_ID_CHANNEL_BANDWIDTH,             MENU_W_N           ,STR_BANDWIDTH},
 #endif
 
-                {/*"Scramb",*/ VOICE_ID_SCRAMBLER_ON, MENU_SCR, STR_SCRAMBLER}, // was "SCR"
                 {/*"BusyCL",*/ VOICE_ID_BUSY_LOCKOUT, MENU_BCL, STR_BUSY_CHANNEL_LOCKOUT}, // was "BCL"
                 {/*"Compnd",*/ VOICE_ID_INVALID, MENU_COMPAND, STR_COMPANDER},
                 {/*"ChSave",*/ VOICE_ID_MEMORY_CHANNEL, MENU_MEM_CH, STR_SAVE_CHANNEL}, // was "MEM-CH"
@@ -491,23 +490,6 @@ const char gSubMenu_BATTYP[][8] =
                 "2200mAh"
         };
 
-const char gSubMenu_SCRAMBLER[][7] =
-        {
-//                "OFF",
-                STR_OFF,
-
-                "2600Hz",
-                "2700Hz",
-                "2800Hz",
-                "2900Hz",
-                "3000Hz",
-                "3100Hz",
-                "3200Hz",
-                "3300Hz",
-                "3400Hz",
-                "3500Hz"
-        };
-
 #ifdef ENABLE_CUSTOM_SIDEFUNCTIONS
 const t_sidefunction SIDEFUNCTIONS[] =
         {
@@ -833,19 +815,6 @@ void UI_DisplayMenu(void) {
                 break;
 #endif
 
-        case MENU_SCR:
-            strcpy(String, gSubMenu_SCRAMBLER[gSubMenuSelection]);
-
-#if 1
-            //  if (gSubMenuSelection > 0 && gSetting_ScrambleEnable)
-            if (gSubMenuSelection > 0)
-                BK4819_EnableScramble(gSubMenuSelection - 1);
-            else
-                BK4819_DisableScramble();
-#endif
-            break;
-
-
         case MENU_ABR:
             strcpy(String, gSubMenu_BACKLIGHT[gSubMenuSelection]);
 
@@ -907,11 +876,6 @@ void UI_DisplayMenu(void) {
             strcpy(String, gSubMenu_OFF_ON[gSubMenuSelection]);
 
             break;
-//        case MENU_SCREN:
-//            strcpy(String, gSubMenu_OFF_ON[gSubMenuSelection]);
-//
-//
-//            break;
 
         case MENU_MEM_CH:
         case MENU_1_CALL:

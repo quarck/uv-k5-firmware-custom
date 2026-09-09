@@ -319,6 +319,9 @@ void BK4819_InitAGC(bool amModulation) {
     }
     BK4819_WriteRegister(BK4819_REG_7B, 0x8420);
 
+    // scrambling is never used by this firmware -- clear the bit once here so
+    // it is in a known state from power-on
+    BK4819_DisableScramble();
 }
 
 
@@ -874,13 +877,6 @@ void BK4819_PickRXFilterPathBasedOnFrequency(uint32_t Frequency) {
 void BK4819_DisableScramble(void) {
     const uint16_t Value = BK4819_ReadRegister(BK4819_REG_31);
     BK4819_WriteRegister(BK4819_REG_31, Value & ~(1u << 1));
-}
-
-void BK4819_EnableScramble(uint8_t Type) {
-    const uint16_t Value = BK4819_ReadRegister(BK4819_REG_31);
-    BK4819_WriteRegister(BK4819_REG_31, Value | (1u << 1));
-
-    BK4819_WriteRegister(BK4819_REG_71, 0x68DC + (Type * 1032));   // 0110 1000 1101 1100
 }
 
 bool BK4819_CompanderEnabled(void) {

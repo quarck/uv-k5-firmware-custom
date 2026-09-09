@@ -877,17 +877,6 @@ void UI_DisplayMain(void) {
         }
 
 #endif
-        // show the audio scramble symbol
-        if (vfoInfo->SCRAMBLING_TYPE > 0/* && gSetting_ScrambleEnable*/) {
-#if ENABLE_CHINESE_FULL != 4 || defined(ENABLE_ENGLISH)
-            UI_PrintStringSmall("ENC", LCD_WIDTH + 106, 0, line + 1);//中文信道1 (Chinese channel 1)
-#else
-            if (IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]))
-                UI_PrintStringSmall("E", LCD_WIDTH + 29, 0, line + 1); //中文信道1 (Chinese channel 1) ok
-            else
-                UI_PrintStringSmall("ENC", LCD_WIDTH + 106, 0, line + 1); //中文信道1 (Chinese channel 1)
-#endif
-        }
     }
 #ifdef ENABLE_AGC_SHOW_DATA
     center_line = CENTER_LINE_IN_USE;

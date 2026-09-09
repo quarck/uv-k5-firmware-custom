@@ -46,7 +46,6 @@ enum {
     MENU_OFFSET,
     MENU_TOT,
     MENU_W_N,
-    MENU_SCR,
     MENU_BCL,
     MENU_MEM_CH,
     MENU_DEL_CH,
@@ -133,7 +132,6 @@ enum {
 //    MENU_350TX,
 //    MENU_500TX,
 //    MENU_350EN,
-    //  MENU_SCREN,
 #ifdef ENABLE_F_CAL_MENU
     MENU_F_CALI,  // reference xtal calibration
 #endif
@@ -284,7 +282,6 @@ extern const char    gSubMenu_AM_fix_test1[4][8];
 #endif
 //extern const char        gSubMenu_BAT_TXT[3][3];//8
 extern const char gSubMenu_BATTYP[2][8];
-extern const char gSubMenu_SCRAMBLER[11][7];
 
 typedef struct {
     char *name;

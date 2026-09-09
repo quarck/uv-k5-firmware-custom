@@ -1789,10 +1789,7 @@ static void ProcessKey(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld) {
 
                     BK4819_ExitDTMF_TX(false);
 
-                    if (gCurrentVfo->SCRAMBLING_TYPE == 0 || !gSetting_ScrambleEnable)
-                        BK4819_DisableScramble();
-                    else
-                        BK4819_EnableScramble(gCurrentVfo->SCRAMBLING_TYPE - 1);
+                    BK4819_DisableScramble();
                 }
             } else {
                 if (gEeprom.DTMF_SIDE_TONE) {    // user will here the DTMF tones in speaker

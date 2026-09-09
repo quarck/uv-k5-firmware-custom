@@ -316,7 +316,6 @@ int MENU_GetLimits(uint8_t menu_id, int32_t *pMin, int32_t *pMax) {
 //		case MENU_200TX:
 //		case MENU_500TX:
 //		case MENU_350EN:
-//		case MENU_SCREN:
 //			*pMin = 0;
 //			*pMax = ARRAY_SIZE(gSubMenu_OFF_ON) - 1;
 //			break;
@@ -327,11 +326,6 @@ int MENU_GetLimits(uint8_t menu_id, int32_t *pMin, int32_t *pMax) {
 //			*pMin = 0;
 //			*pMax = ARRAY_SIZE(gModulationStr) - 1;
 //			break;
-
-        case MENU_SCR:
-            *pMin = 0;
-            *pMax = ARRAY_SIZE(gSubMenu_SCRAMBLER) - 1;
-            break;
 
         case MENU_TOT:
             *pMin = 0;
@@ -552,17 +546,6 @@ void MENU_AcceptSetting(void) {
                 gRequestSaveChannel       = 1;
                 return;
 #endif
-        case MENU_SCR:
-            gTxVfo->SCRAMBLING_TYPE = gSubMenuSelection;
-#if 0
-            if (gSubMenuSelection > 0 && gSetting_ScrambleEnable)
-                BK4819_EnableScramble(gSubMenuSelection - 1);
-            else
-                BK4819_DisableScramble();
-#endif
-            gRequestSaveChannel = 1;
-            return;
-
         case MENU_BCL:
             gTxVfo->BUSY_CHANNEL_LOCK = gSubMenuSelection;
             gRequestSaveChannel = 1;
@@ -861,10 +844,6 @@ void MENU_AcceptSetting(void) {
 //			gFlagResetVfos       = true;
 //			break;
 
-//		case MENU_SCREN:
-//			gSetting_ScrambleEnable = gSubMenuSelection;
-//			gFlagReconfigureVfos    = true;
-//			break;
 
 #ifdef ENABLE_F_CAL_MENU
             case MENU_F_CALI:
@@ -1003,10 +982,6 @@ void MENU_ShowCurrentSetting(void) {
             gSubMenuSelection = gTxVfo->CHANNEL_BANDWIDTH;
             break;
 #endif
-        case MENU_SCR:
-            gSubMenuSelection = gTxVfo->SCRAMBLING_TYPE;
-            break;
-
         case MENU_BCL:
             gSubMenuSelection = gTxVfo->BUSY_CHANNEL_LOCK;
             break;
@@ -1232,9 +1207,6 @@ void MENU_ShowCurrentSetting(void) {
 //			gSubMenuSelection = gSetting_350EN;
 //			break;
 
-//		case MENU_SCREN:
-//			gSubMenuSelection = gSetting_ScrambleEnable;
-//			break;
 
 #ifdef ENABLE_F_CAL_MENU
             case MENU_F_CALI:
@@ -1678,8 +1650,7 @@ static void MENU_Key_MENU(const bool bKeyPressed, const bool bKeyHeld) {
 #endif
     if (!gIsInSubMenu) {
 #ifdef ENABLE_VOICE
-        if (UI_MENU_GetCurrentMenuId() != MENU_SCR)
-            gAnotherVoiceID = MenuList[gMenuCursor].voice_id;
+        gAnotherVoiceID = MenuList[gMenuCursor].voice_id;
 #endif
         if (UI_MENU_GetCurrentMenuId() == MENU_DEL_CH || UI_MENU_GetCurrentMenuId() == MENU_MEM_NAME)
 //            if (!RADIO_CheckValidChannel(gSubMenuSelection, false, 0))
@@ -1840,10 +1811,7 @@ UI_MENU_GetCurrentMenuId() == MENU_MDC_ID
     SCANNER_Stop();
 
 #ifdef ENABLE_VOICE
-    if (UI_MENU_GetCurrentMenuId() == MENU_SCR)
-        gAnotherVoiceID = (gSubMenuSelection == 0) ? VOICE_ID_SCRAMBLER_OFF : VOICE_ID_SCRAMBLER_ON;
-    else
-        gAnotherVoiceID = VOICE_ID_CONFIRM;
+    gAnotherVoiceID = VOICE_ID_CONFIRM;
 #endif
 
     gInputBoxIndex = 0;
