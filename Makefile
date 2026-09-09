@@ -19,7 +19,7 @@ ENABLE_VOX                    ?= 0
 ENABLE_ALARM                  ?= 0
 ENABLE_TX1750                 ?= 0
 ENABLE_PWRON_PASSWORD         ?= 0
-ENABLE_DTMF_CALLING           ?= 0
+ENABLE_DTMF_CALLING           ?= 1
 ENABLE_FLASHLIGHT             ?= 0
 ENABLE_BOOTLOADER			 ?= 0
 # ---- CUSTOM MODS ----
@@ -51,7 +51,7 @@ ENABLE_MDC1200_EDIT			  = 0
 ENABLE_UART_RW_BK_REGS 		  ?= 0
 ENABLE_EEPROM_32BIT           ?= 1
 # Receive-only build: PTT never keys the transmitter.
-ENABLE_TX_BLOCKED             ?= 1
+ENABLE_TX_BLOCKED             ?= 0
 ENABLE_AUDIO_BAR_DEFAULT      ?= 0
 ENABLE_EEPROM_TYPE        	   = 0
 ENABLE_CHINESE_FULL 		   = 0
