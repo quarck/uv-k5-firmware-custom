@@ -288,7 +288,7 @@ EEPROM_ReadBuffer(0x0EF0, Data, sizeof(gEeprom.REVIVE_CODE));
 
     EEPROM_ReadBuffer(0x0F30, gCustomAesKey, sizeof(gCustomAesKey));
     bHasCustomAesKey = false;
-    //锁定
+    //锁定 (locked)
     for (unsigned int i = 0; i < ARRAY_SIZE(gCustomAesKey); i++)
     {
         if (gCustomAesKey[i] != 0xFFFFFFFFu)
@@ -408,7 +408,7 @@ void SETTINGS_FetchChannelName(char *s, const int channel)
 
     while (i >= 0 && s[i] == 32)  // trim trailing spaces
         s[i--] = 0;               // null term
-        //中文信道名
+        //中文信道名 (Chinese channel name)
 //    strcpy(s,"\x9b\x2c\x9b\x2c\x9b\x2c\x9b\x2c\x9b\x2c\x9b\x2c\x9b\x2c");
 }
 

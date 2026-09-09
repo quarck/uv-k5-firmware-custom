@@ -44,7 +44,7 @@ bool check_font(unsigned char *font1,unsigned char *font2)
 {
     return (memcmp(font1,font2,CHN_FONT_WIDTH*2)==0);
 }
-void back_font(int num_show, unsigned char *font) { //压缩转显存显示
+void back_font(int num_show, unsigned char *font) { //压缩 (compress)转显存显示 (convert the compressed form for display in the frame buffer)
     unsigned int local = CHN_FONT_HIGH * CHN_FONT_WIDTH * num_show / 8;
     unsigned int local_bit = (CHN_FONT_HIGH * CHN_FONT_WIDTH * num_show) % 8;
     unsigned char now_font[CHN_FONT_WIDTH * 2] = {0};
@@ -80,7 +80,7 @@ int main() {
 //    return 0;
     int now_byte_index = 0;
     int now_bit_index = 0;
-    for (int k = 0; k < CHN_FONT_NUM; k++) {//压缩
+    for (int k = 0; k < CHN_FONT_NUM; k++) {//压缩 (compress)
         unsigned char bitmap[CHN_FONT_HIGH][CHN_FONT_WIDTH] = {0};
         for (int i = 0; i < CHN_FONT_WIDTH * 2; i++) {
             if (i < CHN_FONT_WIDTH) {

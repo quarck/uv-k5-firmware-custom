@@ -36,9 +36,9 @@ UI_DisplayClear();
     UI_PrintStringSmall("FM", 0, 127, 0);
 
     if (gAskToSave) {
-        pPrintStr = 存置问;
+        pPrintStr = STR_SAVE_PROMPT;
     } else if (gAskToDelete) {
-        pPrintStr = 删除问;
+        pPrintStr = STR_DELETE_PROMPT;
     } else if (gFM_ScanState == FM_SCAN_OFF) {
         if (gEeprom.FM_IsMrMode) {
             sprintf(String, "MR(CH%02u)", gEeprom.FM_SelectedChannel + 1);

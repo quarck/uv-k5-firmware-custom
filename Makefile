@@ -353,7 +353,7 @@ endif
 CFLAGS += -Wextra
 #CFLAGS += -Wpedantic
 
-# 设置PACKED_FILE_SUFFIX，根据ENABLE_CHINESE_FULL的值设置不同的后缀
+# 设置PACKED_FILE_SUFFIX，根据ENABLE_CHINESE_FULL的值设置不同的后缀 (set PACKED_FILE_SUFFIX - a different suffix depending on the value of ENABLE_CHINESE_FULL)
 
 CFLAGS += -DENABLE_EEPROM_TYPE=$(ENABLE_EEPROM_TYPE)
 
@@ -695,9 +695,9 @@ endif
 clean:
 	@$(RM) $(call FixPath, $(TARGET).bin $(PACKED_FILE_SUFFIX).bin $(TARGET) )
 
-ifeq ($(OS), Windows_NT) # Windows 系统
+ifeq ($(OS), Windows_NT) # Windows 系统 (Windows system)
 	@call del_win.bat
-else # 类 Unix 系统（Linux, macOS, 等）
+else # 类 Unix 系统（Linux, macOS, 等） (Unix-like system (Linux, macOS, etc.))
 	chmod +x del_linux.sh
 	sh ./del_linux.sh
 endif

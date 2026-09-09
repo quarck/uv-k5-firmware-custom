@@ -156,7 +156,7 @@ void UI_PrintStringSmall(const char *pString, uint8_t Start, uint8_t End, uint8_
         Length = Length > 7 ? 7 : Length;
 //#else
 //        #ifdef ENABLE_PINYIN == 0
-////        if(PINYIN_NUM==0) //拼音判断
+////        if(PINYIN_NUM==0) //拼音判断 (pinyin check)
 //            #endif
 //        Length = Length > 14 ? 14 : Length;
 
@@ -402,8 +402,8 @@ void UI_DisplayPopup(const char *string) {
     // DrawRectangle(9,9, 118,38, true);
 
     UI_PrintStringSmall(string, 9, 118, 2);
-    //按EXIT键
-    UI_PrintStringSmall(按EXIT键, 9, 118, 5);
+    //按EXIT键 (press the EXIT key)
+    UI_PrintStringSmall(STR_PRESS_EXIT_KEY, 9, 118, 5);
 }
 
 void UI_DisplayClear() {

@@ -243,13 +243,13 @@ void SI4732_Display() {
     } else {
         uint8_t String[19];
 
-        //频率显示
+        //频率显示 (frequency display)
         uint32_t f = siCurrentFreq * divider;
         uint16_t fp1 = f / 100000;
         uint16_t fp2 = f / 100 % 1000;
         sprintf(String, "%3u.%03u", fp1, fp2);
         UI_DisplayFrequency(String, 64 - strlen(String) * 13 / 2, 2, false);
-        //模式显示
+        //模式显示 (mode display)
         const uint8_t BASE = 38;
         GUI_DisplaySmallest(si4732mode == SI47XX_CW
                                 ? (SI47XX_GetSsbSideband() == SI47XX_USB ? "CWU" : "CWL")
@@ -361,10 +361,10 @@ void HandleUserInput() {
     kbds.prev = kbds.current;
     kbds.current = GetKey();
     bool KEY_TYPE1 = false, KEY_TYPE2 = false, KEY_TYPE3 = false;
-    // 无按键
+    // 无按键 (no key pressed)
     if (kbds.current == KEY_INVALID) {
         if (kbds.counter > 2 && kbds.counter <= 6) {
-            // 短按松手
+            // 短按松手 (short press released)
             KEY_TYPE3 = true;
         }
         kbds.counter = 0;
@@ -373,14 +373,14 @@ void HandleUserInput() {
             KEY_TYPE1 = true;
         }
         if (kbds.current == kbds.prev) {
-            // 持续按下
+            // 持续按下 (held down)
             if (kbds.counter <= 14) {
 
                 KEY_TYPE2 = true;
                 kbds.counter++;
             }
         } else {
-            // 按键变化，重置计数器
+            // 按键变化，重置计数器 (the key changed - reset the counter)
             kbds.counter = 1;
         }
         SYSTEM_DelayMs(20);

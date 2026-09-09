@@ -54,12 +54,12 @@ const int8_t dBmCorrTable[7] = {
 
 const char *VfoStateStr[] = {
         [VFO_STATE_NORMAL]="",
-        [VFO_STATE_BUSY]=遇忙,
-        [VFO_STATE_BAT_LOW]=低电压,
-        [VFO_STATE_TX_DISABLE]=禁止发射,
-        [VFO_STATE_TIMEOUT]=发送超时,
+        [VFO_STATE_BUSY]=STR_BUSY,
+        [VFO_STATE_BAT_LOW]=STR_LOW_VOLTAGE,
+        [VFO_STATE_TX_DISABLE]=STR_TX_DISABLED,
+        [VFO_STATE_TIMEOUT]=STR_TX_TIMEOUT,
         [VFO_STATE_ALARM]="ALARM",
-        [VFO_STATE_VOLTAGE_HIGH]=高电压,
+        [VFO_STATE_VOLTAGE_HIGH]=STR_HIGH_VOLTAGE,
         // 13 chars is the maximum UI_PrintStringSmall can render from x=31
         [VFO_STATE_NO_LICENSE]="GET A LICENSE"
 };
@@ -356,8 +356,8 @@ void UI_DisplayMain(void) {
     UI_DisplayClear();
 
     if (gLowBattery && !gLowBatteryConfirmed) {
-        //低电压
-        UI_DisplayPopup(低电压);
+        //低电压 (low voltage)
+        UI_DisplayPopup(STR_LOW_VOLTAGE);
         ST7565_BlitFullScreen();
         return;
     }
@@ -379,9 +379,9 @@ void UI_DisplayMain(void) {
 
         UI_PrintStringSmall("to unlock",    0, LCD_WIDTH, 3);
 #else
-//长按 # 键解锁
+//长按 # 键解锁 (long-press the # key to unlock)
 
-        UI_PrintStringSmall(长按井键解锁, 0, LCD_WIDTH, 1);
+        UI_PrintStringSmall(STR_LONG_PRESS_HASH_TO_UNLOCK, 0, LCD_WIDTH, 1);
 #endif
 
 #endif
@@ -773,12 +773,12 @@ void UI_DisplayMain(void) {
                 break;
         }
 #if ENABLE_CHINESE_FULL != 4 || defined(ENABLE_ENGLISH)
-        UI_PrintStringSmall(s, LCD_WIDTH + 24, 0, line + 1); //中文信道1
+        UI_PrintStringSmall(s, LCD_WIDTH + 24, 0, line + 1); //中文信道1 (Chinese channel 1)
 #else
         if (IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]))
-            UI_PrintStringSmall(s, LCD_WIDTH + 0, 0, line + 1); //中文信道1
+            UI_PrintStringSmall(s, LCD_WIDTH + 0, 0, line + 1); //中文信道1 (Chinese channel 1)
         else
-            UI_PrintStringSmall(s, LCD_WIDTH + 24, 0, line + 1); //中文信道1
+            UI_PrintStringSmall(s, LCD_WIDTH + 24, 0, line + 1); //中文信道1 (Chinese channel 1)
 
 
         const bool bFlagMr = IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]) && !(FUNCTION_IsRx() && gEeprom.RX_VFO == vfo_num) && !(gCurrentFunction == FUNCTION_TRANSMIT && activeTxVFO == vfo_num);
@@ -791,13 +791,13 @@ void UI_DisplayMain(void) {
             const unsigned int i = vfoInfo->OUTPUT_POWER % 3;
 
 #if ENABLE_CHINESE_FULL != 4 || defined(ENABLE_ENGLISH)
-            UI_PrintStringSmall(pwr_list[i], LCD_WIDTH + 46, 0, line + 1); //中文信道1
+            UI_PrintStringSmall(pwr_list[i], LCD_WIDTH + 46, 0, line + 1); //中文信道1 (Chinese channel 1)
 #else
 
             if (bFlagMr)
-                UI_PrintStringSmall(pwr_list[i], LCD_WIDTH + 9, 0, line - 1); //中文信道1
+                UI_PrintStringSmall(pwr_list[i], LCD_WIDTH + 9, 0, line - 1); //中文信道1 (Chinese channel 1)
             else if (bFlagFreq)
-                UI_PrintStringSmall(pwr_list[i], LCD_WIDTH + 46, 0, line + 1); //中文信道1
+                UI_PrintStringSmall(pwr_list[i], LCD_WIDTH + 46, 0, line + 1); //中文信道1 (Chinese channel 1)
 
 #endif
         }
@@ -808,12 +808,12 @@ void UI_DisplayMain(void) {
             const unsigned int i = vfoInfo->TX_OFFSET_FREQUENCY_DIRECTION % 3;
 
 #if ENABLE_CHINESE_FULL != 4 || defined(ENABLE_ENGLISH)
-            UI_PrintStringSmall(dir_list[i], LCD_WIDTH + 54, 0, line + 1);//中文信道1
+            UI_PrintStringSmall(dir_list[i], LCD_WIDTH + 54, 0, line + 1);//中文信道1 (Chinese channel 1)
 #else
             if (bFlagMr)
-                UI_PrintStringSmall(dir_list[i], LCD_WIDTH + 17, 0, line - 1); //中文信道1
+                UI_PrintStringSmall(dir_list[i], LCD_WIDTH + 17, 0, line - 1); //中文信道1 (Chinese channel 1)
             else if (bFlagFreq)
-                UI_PrintStringSmall(dir_list[i], LCD_WIDTH + 54, 0, line + 1); //中文信道1
+                UI_PrintStringSmall(dir_list[i], LCD_WIDTH + 54, 0, line + 1); //中文信道1 (Chinese channel 1)
 #endif
         }
 
@@ -821,12 +821,12 @@ void UI_DisplayMain(void) {
         if (vfoInfo->FrequencyReverse) {
             char *flag = vfoInfo->FrequencyReverse == 1 ? "R" : "T";
 #if ENABLE_CHINESE_FULL != 4 || defined(ENABLE_ENGLISH)
-            UI_PrintStringSmall(flag, LCD_WIDTH + 62, 0, line + 1);//中文信道1
+            UI_PrintStringSmall(flag, LCD_WIDTH + 62, 0, line + 1);//中文信道1 (Chinese channel 1)
 #else
             if (bFlagMr)
-                UI_PrintStringSmall(flag, LCD_WIDTH + 24, 0, line - 1); //中文信道1
+                UI_PrintStringSmall(flag, LCD_WIDTH + 24, 0, line - 1); //中文信道1 (Chinese channel 1)
             else if (bFlagFreq)
-                UI_PrintStringSmall(flag, LCD_WIDTH + 62, 0, line + 1); //中文信道1
+                UI_PrintStringSmall(flag, LCD_WIDTH + 62, 0, line + 1); //中文信道1 (Chinese channel 1)
 
 #endif
         }
@@ -847,12 +847,12 @@ void UI_DisplayMain(void) {
         // show the DTMF decoding symbol
         if (vfoInfo->DTMF_DECODING_ENABLE || gSetting_KILLED) {
 #if ENABLE_CHINESE_FULL != 4 || defined(ENABLE_ENGLISH)
-            UI_PrintStringSmall("DTMF", LCD_WIDTH + 78, 0, line + 1);//中文信道1
+            UI_PrintStringSmall("DTMF", LCD_WIDTH + 78, 0, line + 1);//中文信道1 (Chinese channel 1)
 #else
             if (IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]))
-                UI_PrintStringSmall("D", LCD_WIDTH + 105, 0, line + 1); //中文信道1
+                UI_PrintStringSmall("D", LCD_WIDTH + 105, 0, line + 1); //中文信道1 (Chinese channel 1)
             else
-                UI_PrintStringSmall("DTMF", LCD_WIDTH + 78, 0, line + 1); //中文信道1
+                UI_PrintStringSmall("DTMF", LCD_WIDTH + 78, 0, line + 1); //中文信道1 (Chinese channel 1)
 #endif
         }
 
@@ -860,12 +860,12 @@ void UI_DisplayMain(void) {
         // show the audio scramble symbol
         if (vfoInfo->SCRAMBLING_TYPE > 0/* && gSetting_ScrambleEnable*/) {
 #if ENABLE_CHINESE_FULL != 4 || defined(ENABLE_ENGLISH)
-            UI_PrintStringSmall("ENC", LCD_WIDTH + 106, 0, line + 1);//中文信道1
+            UI_PrintStringSmall("ENC", LCD_WIDTH + 106, 0, line + 1);//中文信道1 (Chinese channel 1)
 #else
             if (IS_MR_CHANNEL(gEeprom.ScreenChannel[vfo_num]))
-                UI_PrintStringSmall("E", LCD_WIDTH + 29, 0, line + 1); //中文信道1 ok
+                UI_PrintStringSmall("E", LCD_WIDTH + 29, 0, line + 1); //中文信道1 (Chinese channel 1) ok
             else
-                UI_PrintStringSmall("ENC", LCD_WIDTH + 106, 0, line + 1); //中文信道1
+                UI_PrintStringSmall("ENC", LCD_WIDTH + 106, 0, line + 1); //中文信道1 (Chinese channel 1)
 #endif
         }
     }

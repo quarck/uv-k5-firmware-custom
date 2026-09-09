@@ -4,3 +4,6 @@ firmware
 /firmware.packed.bin
 /firmware.bin
 /compiled-firmware
+QRCK*.bin
+K5TOOL*
+__pycache__

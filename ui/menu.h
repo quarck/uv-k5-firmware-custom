@@ -28,7 +28,7 @@ typedef struct {
     VOICE_ID_t voice_id;
     uint8_t menu_id;
 #if ENABLE_CHINESE_FULL == 0 || defined(ENABLE_ENGLISH)
-    const char name[7]; // 使用指针而不是固定长度数组
+    const char name[7]; // 使用指针而不是固定长度数组 (use a pointer instead of a fixed-length array)
 
 
 #endif
@@ -319,26 +319,26 @@ void UI_ShowChineseMenu(void);
 
 #ifdef ENABLE_PINYIN
 extern char num_excel[8][4] ;
-bool judge_belong(uint32_t a,uint32_t b);//拼音归属判断
+bool judge_belong(uint32_t a,uint32_t b);//拼音归属判断 (test whether a pinyin code belongs to a group)
 
-uint8_t sear_pinyin_code(uint32_t target,uint8_t *pinyin_num,uint8_t *found);//返回拼音索引0~213，以及是否找到
+uint8_t sear_pinyin_code(uint32_t target,uint8_t *pinyin_num,uint8_t *found);//返回拼音索引0~213，以及是否找到 (returns the pinyin index 0~213 and whether it was found)
 
 
 
-extern uint8_t INPUT_MODE;//0中文 1英文 2数字、符号
-extern uint8_t INPUT_STAGE;//中文：0 还没输入，不显示拼音和汉字 1输入了
-//英语：0 未选字 1选字
-//数字：0正常模式 1按了上下的轮询模式，需要按MENU确定
+extern uint8_t INPUT_MODE;//0中文 1英文 2数字、符号 (0 Chinese, 1 English, 2 digits/symbols)
+extern uint8_t INPUT_STAGE;//中文：0 还没输入，不显示拼音和汉字 1输入了 (Chinese: 0 nothing typed yet, pinyin and hanzi not shown; 1 something typed)
+//英语：0 未选字 1选字 (English: 0 no character selected, 1 character selected)
+//数字：0正常模式 1按了上下的轮询模式，需要按MENU确定 (digits: 0 normal mode, 1 up/down cycling mode, MENU confirms)
 
-extern uint8_t INPUT_SELECT;//选择的按键
+extern uint8_t INPUT_SELECT;//选择的按键 (the selected key)
 extern uint8_t INPUT_MODE_LAST;
 extern uint32_t PINYIN_CODE;
 extern uint32_t PINYIN_CODE_INDEX;
 extern uint8_t PINYIN_SEARCH_INDEX;
 extern uint8_t PINYIN_SEARCH_FOUND;
 extern uint8_t PINYIN_SEARCH_NUM;
-extern uint8_t PINYIN_NOW_INDEX;//当前拼音组合地址
-extern uint8_t PINYIN_NOW_NUM;//当前拼音组合地址
+extern uint8_t PINYIN_NOW_INDEX;//当前拼音组合地址 (address of the current pinyin combination)
+extern uint8_t PINYIN_NOW_NUM;//当前拼音组合地址 (address of the current pinyin combination)
 extern uint8_t PINYIN_SEARCH_MODE;
 extern uint8_t PINYIN_START_INDEX;
 extern uint8_t PINYIN_NUM_SELECT;
