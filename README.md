@@ -111,25 +111,32 @@ functions:
                                                                                                                            |
 # Eeprom Layout Explanation
 
+> **This table describes upstream LOSEHU, not this fork.** Rows marked 🚫 are
+> regions this fork no longer touches: MDC1200, the Chinese fonts and menu
+> strings, the pinyin tables and the custom boot image. That code has been
+> **deleted**, not merely disabled, so unlike upstream these regions cannot be
+> brought back by flipping a build flag, and nothing this firmware does will
+> collide with data you store there. See
+> [EEPROM map for this fork](#eeprom-map-for-this-fork) for what it actually
+> reads and writes.
+
 | Eeprom Address                          | Description                                                                                                                                             |
 |----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
 | 😭 **General**                          | Version: LOSEHUxxx                                                                                                                                      |
 | 0X01D00~0x02000                        | Rarely changed                                                                                                                                          |
 | 0X01D00 ~ 0X01E00<br/>0X1F90 ~ 0X01FF0 | **MDC1200** - 22 MDC contacts<br/>Each contact occupies 16B, with the first 2B being MDC ID and the next 14B being contact name                         |
-| 0X01FFF                                | **MDC1200** - Number of MDC contacts                                                                                                                    |
-| 0x01FFD~0x01FFE                        | **MDC1200** - MDC ID                                                                                                                                    |
+| 0X01FFF                                | **MDC1200** - Number of MDC contacts<br/>🚫 **Not used by this fork** — code removed |
+| 0x01FFD~0x01FFE                        | **MDC1200** - MDC ID<br/>🚫 **Not used by this fork** — code removed — this fork had never used this address anyway, it kept the ID at `0x0E91` |
 | 0x01FF8~0x01FFC                        | Side key functions                                                                                                                                      |
-| 0x01FFD~0x01FFE                        | **MDC1200** - MDC ID                                                                                                                                    |
 | 😱 **Expanded Version (K, H)**          | Version: LOSEHUxxxK, LOSEHUxxxH                                                                                                                         |
-| 0x02000~0x02012                        | Boot character 1                                                                                                                                        |
-| 0x02012~0x02024                        | Boot character 2                                                                                                                                        |
-| 0x02024~0x02025                        | Length of boot characters 1 and 2                                                                                                                       |
-| 0x02080~0x02480                        | Boot screen, length 128 (width) * 64/8 = 1024 = 0x400                                                                                                   |
-| 0x01FFD~0x01FFE                        | **MDC1200** - MDC ID                                                                                                                                    |
-| 0x02480~0x0255C                        | gFontBigDigits, length 11 * 20 = 220 = 0XDC                                                                                                             |
-| 0x0255C~0x0267C                        | gFont3x5, length 96 * 3 = 288 = 0X120                                                                                                                   |
-| 0x0267C~0x028B0                        | gFontSmall, length 96 * 6 = 564 = 0X234                                                                                                                 |
-| 0x028B0~0x02B96                        | Menu encoding, length 53 * 14 = 742 = 0X2E6                                                                                                             |
+| 0x02000~0x02012                        | Boot character 1<br/>🚫 **Not used by this fork** — code removed |
+| 0x02012~0x02024                        | Boot character 2<br/>🚫 **Not used by this fork** — code removed |
+| 0x02024~0x02025                        | Length of boot characters 1 and 2<br/>🚫 **Not used by this fork** — code removed |
+| 0x02080~0x02480                        | Boot screen, length 128 (width) * 64/8 = 1024 = 0x400<br/>🚫 **Not used by this fork** — code removed |
+| 0x02480~0x0255C                        | gFontBigDigits, length 11 * 20 = 220 = 0XDC<br/>🚫 **Not used by this fork** — code removed — this fork keeps the font in flash |
+| 0x0255C~0x0267C                        | gFont3x5, length 96 * 3 = 288 = 0X120<br/>🚫 **Not used by this fork** — code removed — this fork keeps the font in flash |
+| 0x0267C~0x028B0                        | gFontSmall, length 96 * 6 = 564 = 0X234<br/>🚫 **Not used by this fork** — code removed — this fork keeps the font in flash |
+| 0x028B0~0x02B96                        | Menu encoding, length 53 * 14 = 742 = 0X2E6<br/>🚫 **Not used by this fork** — code removed |
 | 0x02BA0~0x02BA9                        | **Doppler** - Satellite names, with the first character first, up to 9 English characters, the last one being '\0'                                      |
 | 0x02BAA~0x02BAF                        | **Doppler** - Year (tens and units), month, day, hour, minute, and second of start transit time                                                         |
 | 0x02BB0~0x2BB5                         | **Doppler** - Year (tens and units), month, day, hour, minute, and second of departure time                                                             |
@@ -140,11 +147,11 @@ functions:
 | 0x02C64~0x02D34                        | **Doppler** - DCS_Options, length 104 * 2 = 208 = 0xD0                                                                                                  |
 | 0x02BBC~0X02BBF                        | **Doppler** - Difference between start transit time and UNIX timestamp of January 1, 2000, with the low byte first and the high byte second             |
 | 0X02BC0~0X02BC5                        | **Doppler** - Year (tens and units), month, day, hour, minute, and second of current time                                                               |
-| 0x02E00~0x1E1E6                        | GB2312 Chinese font library, total 6763 * 11 * 12/8 = 111590 = 0x1B3E6                                                                                  |
+| 0x02E00~0x1E1E6                        | GB2312 Chinese font library, total 6763 * 11 * 12/8 = 111590 = 0x1B3E6<br/>🚫 **Not used by this fork** — code removed |
 | 0x1E200~0x20000(MAX)                   | **Doppler** - 2*n (even) second satellite data, 8B per second, including uplink/downlink frequency/10, with the low byte first and the high byte second |
 | 😰 **2Mib Expanded Version (H)**        | Version: LOSEHUxxxH                                                                                                                                     |
-| 0x20000~0x26B00                        | **Chinese Input Method** - Pinyin index, corresponding number of characters, starting address of characters                                             |
-| 0x26B00~0X2A330                        | **Chinese Input Method** - Pinyin Chinese character table                                                                                               |
+| 0x20000~0x26B00                        | **Chinese Input Method** - Pinyin index, corresponding number of characters, starting address of characters<br/>🚫 **Not used by this fork** — code removed |
+| 0x26B00~0X2A330                        | **Chinese Input Method** - Pinyin Chinese character table<br/>🚫 **Not used by this fork** — code removed |
 | 0x3C228~0x40000                        | **SI4732**-patch，Length 0x3DD8，used to update SI4732 firmware                                                                                           |
 | 0x3C210~0x3C21C                        | **SI4732**FM、AM、SSB Freq、Mode                                                                                                                           |
 
@@ -311,7 +318,11 @@ Where this fork actually puts things, which differs from the upstream layout abo
 
 | Address | Size | Use |
 |---|---|---|
+| `0x0E90` | 1 | beep control |
+| `0x0E91`-`0x0E92` | 2 | *formerly MDC1200 ID* — now written as zero |
 | `0x0E93` | 1 | CW pitch (`CWTone` menu item, 10 Hz units) |
+| `0x0E95` | 1 | scan resume mode |
+| `0x0EA9` | 1 | roger beep — now only `0` (off) or `1` (roger) |
 | `0x1FE0`-`0x1FE3` | 4 | SI4732 frequency, FM |
 | `0x1FE4`-`0x1FE7` | 4 | SI4732 frequency, shared by AM/LSB/USB/CW |
 | `0x1FF0` | 1 | **bootloader** boot mode (`2` = flash mode) |
@@ -323,6 +334,37 @@ The patch sits at the upstream address `0x3C228`, defined by `PATCH_START` in
 `0x052B`/`0x0538` UART commands — which exist only when the firmware is built
 with **`ENABLE_EEPROM_32BIT = 1`** (the default here). `k5eeprom.py` picks the
 32-bit commands automatically for any address past 64 KB.
+
+#### Upgrading from a build that had MDC1200
+
+`0x0E91`-`0x0E92` held the MDC1200 ID and are now zeroed on the next settings
+write. `0x0EA9` (roger beep) previously accepted `0`-`5`, where `2`-`5` selected
+the MDC variants; it now accepts `0`-`1` and anything larger reads back as
+**off**. So a radio that had roger set to one of the MDC modes will come up with
+the roger beep disabled after flashing. Nothing else moves.
+
+#### Regions this fork no longer reads
+
+These held the Chinese fonts and strings, the pinyin tables, the custom boot
+image and the MDC1200 contact list. The code that read them has been deleted, so
+they are free — and, unlike upstream, cannot be reclaimed by a build flag:
+
+| Region | Size | Formerly |
+|---|---|---|
+| `0x01D00`-`0x01E00`, `0x1F90`-`0x1FF0` | 352 B | MDC1200 contacts |
+| `0x02000`-`0x02480` | 1,152 B | boot text and boot screen |
+| `0x02480`-`0x028B0` | 1,072 B | `gFontBigDigits`, `gFont3x5`, `gFontSmall` |
+| `0x028B0`-`0x02B96` | 742 B | Chinese menu strings |
+| `0x02E00`-`0x1E1E6` | 111,590 B | GB2312 glyph data |
+| `0x20000`-`0x2A330` | 41,776 B | pinyin tables |
+
+That is 156,684 bytes in total (~153 KiB), of which 57,078 bytes (~56 KiB) lie
+below the 64 KB boundary and so are reachable with the 16-bit `0x051B`/`0x051D`
+commands; the rest needs the 32-bit pair.
+
+**`0x40000` and above is still off limits** — that is the custom bootloader's
+multi-boot region (firmware table and the RAM-loaded switcher). Below `0x40000`
+is safe; at or above it is not.
 
 Two hazards worth knowing:
 

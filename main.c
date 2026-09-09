@@ -233,9 +233,6 @@ void Main(void) {
     while (boot_counter_10ms > 0 || (KEYBOARD_Poll() != KEY_INVALID)) {
 
         if (KEYBOARD_Poll() == KEY_EXIT
-#if ENABLE_CHINESE_FULL == 4
-            || gEeprom.POWER_ON_DISPLAY_MODE == POWER_ON_DISPLAY_MODE_NONE
-#endif
                 ) {    // halt boot beeps
             boot_counter_10ms = 0;
             break;

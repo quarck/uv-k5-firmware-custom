@@ -583,7 +583,7 @@ bool UART_IsCommandAvailable(void) {
 
 // 32-bit EEPROM access (0x052B read / 0x0538 write). The 16-bit 0x051B/0x051D
 // commands cannot address past 64 KB, so anything above that needs these.
-#if ENABLE_CHINESE_FULL == 4 || defined(ENABLE_EEPROM_32BIT)
+#ifdef ENABLE_EEPROM_32BIT
 //
 //static void CMD_052B(const uint8_t *pBuffer)//read
 //{
@@ -668,7 +668,7 @@ static void CMD_0801(const uint8_t *pBuffer)
 
 void UART_HandleCommand(void) {
     switch (UART_Command.Header.ID) {
-#if ENABLE_CHINESE_FULL == 4 || defined(ENABLE_EEPROM_32BIT)
+#ifdef ENABLE_EEPROM_32BIT
         case 0x052B://read
             CMD_051B(UART_Command.Buffer);
             break;
