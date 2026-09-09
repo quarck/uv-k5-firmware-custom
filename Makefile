@@ -50,6 +50,8 @@ ENABLE_MDC1200_CONTACT        = 0
 ENABLE_MDC1200_EDIT			  = 0
 ENABLE_UART_RW_BK_REGS 		  ?= 0
 ENABLE_EEPROM_32BIT           ?= 1
+# Receive-only build: PTT never keys the transmitter.
+ENABLE_TX_BLOCKED             ?= 1
 ENABLE_AUDIO_BAR_DEFAULT      ?= 0
 ENABLE_EEPROM_TYPE        	   = 0
 ENABLE_CHINESE_FULL 		   = 0
@@ -468,6 +470,9 @@ ifeq ($(ENABLE_UART_RW_BK_REGS),1)
 endif
 ifeq ($(ENABLE_EEPROM_32BIT),1)
 	CFLAGS  += -DENABLE_EEPROM_32BIT
+endif
+ifeq ($(ENABLE_TX_BLOCKED),1)
+	CFLAGS  += -DENABLE_TX_BLOCKED
 endif
 ifeq ($(ENABLE_BIG_FREQ),1)
 	CFLAGS  += -DENABLE_BIG_FREQ

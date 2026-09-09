@@ -281,8 +281,13 @@ void FUNCTION_Select(FUNCTION_Type_t Function) {
             return;
 
         case FUNCTION_TRANSMIT:
+#ifdef ENABLE_TX_BLOCKED
+            // Second barrier: whatever route got here, do not key the PA.
+            return;
+#else
             FUNCTION_Transmit();
             break;
+#endif
 
         case FUNCTION_MONITOR:
             gMonitor = true;

@@ -59,7 +59,9 @@ const char *VfoStateStr[] = {
         [VFO_STATE_TX_DISABLE]=禁止发射,
         [VFO_STATE_TIMEOUT]=发送超时,
         [VFO_STATE_ALARM]="ALARM",
-        [VFO_STATE_VOLTAGE_HIGH]=高电压
+        [VFO_STATE_VOLTAGE_HIGH]=高电压,
+        // 13 chars is the maximum UI_PrintStringSmall can render from x=31
+        [VFO_STATE_NO_LICENSE]="GET A LICENSE"
 };
 // ***************************************************************************
 

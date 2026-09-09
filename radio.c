@@ -1013,6 +1013,12 @@ void RADIO_PrepareTX(void) {
     }
 #endif
 
+#ifdef ENABLE_TX_BLOCKED
+    // Receive-only build. Overrides every check above so the reason shown is
+    // always the same, whatever else might also have blocked the transmission.
+    State = VFO_STATE_NO_LICENSE;
+#endif
+
     if (State != VFO_STATE_NORMAL) {
         // TX not allowed
         RADIO_SetVfoState(State);
