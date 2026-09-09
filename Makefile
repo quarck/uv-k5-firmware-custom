@@ -19,7 +19,7 @@ ENABLE_VOX                    ?= 0
 ENABLE_ALARM                  ?= 0
 ENABLE_TX1750                 ?= 0
 ENABLE_PWRON_PASSWORD         ?= 0
-ENABLE_DTMF_CALLING           ?= 1
+ENABLE_DTMF_CALLING           ?= 0
 ENABLE_FLASHLIGHT             ?= 0
 ENABLE_BOOTLOADER			 ?= 0
 # ---- CUSTOM MODS ----
@@ -116,6 +116,14 @@ ifeq ($(ENABLE_4732),1)
 endif
 ifeq ($(ENABLE_FMRADIO),1)
 	ENABLE_4732=0
+endif
+
+# Mark a receive-only build everywhere it can be identified: the packed file
+# name, and the version shown on the boot screen / reported over UART, since
+# Version[] is compiled from PACKED_FILE_SUFFIX.
+ifeq ($(ENABLE_TX_BLOCKED),1)
+	PACKED_FILE_SUFFIX := $(PACKED_FILE_SUFFIX)-NOTX
+    $(info NOTX)
 endif
 
 
@@ -307,6 +315,11 @@ OBJCOPY = arm-none-eabi-objcopy
 SIZE = arm-none-eabi-size
 
 AUTHOR_STRING ?= QRCK
+# override so the -NOTX marker survives an AUTHOR_STRING given on the command
+# line; fw-pack.py rejects anything longer than 10 characters.
+ifeq ($(ENABLE_TX_BLOCKED),1)
+	override AUTHOR_STRING := $(AUTHOR_STRING)-NOTX
+endif
 # the user might not have/want git installed
 # can set own version string here (max 7 chars)
 ifneq (, $(shell $(WHERE) git))
@@ -646,7 +659,7 @@ all:
 	$(MAKE) flash
 
 flash:
-	python k5flash.py --port $(PORT) QRCKES.bin
+	python k5flash.py --port $(PORT) $(PACKED_FILE_SUFFIX).bin
 
 flashrom:
 	python k5eeprom.py --port $(PORT) write 0x3C228 ssb_patch_8byte.bin
