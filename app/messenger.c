@@ -1,4 +1,3 @@
-#include "app/mdc1200.h"
 #include <string.h>
 #include "driver/keyboard.h"
 #include "driver/st7565.h"
@@ -555,7 +554,7 @@ void solve_sign(const uint16_t interrupt_bits) {
     const bool rx_finished = (interrupt_bits & BK4819_REG_02_FSK_RX_FINISHED) ? true : false;
 
     const uint16_t rx_sync_flags = BK4819_ReadRegister(0x0B);
-#if defined(ENABLE_MDC1200)||defined(ENABLE_MESSENGER)
+#ifdef ENABLE_MESSENGER
 
     const bool rx_sync_neg = (rx_sync_flags & (1u << 7)) ? true : false;
 #endif
@@ -567,68 +566,12 @@ void solve_sign(const uint16_t interrupt_bits) {
         msgStatus = RECEIVING;
 
 #endif
-#ifdef ENABLE_MDC1200
-        mdc1200_rx_buffer_index = 0;
-
-        {
-//            memset(mdc1200_rx_buffer, 0, sizeof(mdc1200_rx_buffer));
-            for (unsigned int  i = 0; i < sizeof(mdc1200_sync_suc_xor); i++)
-                mdc1200_rx_buffer[mdc1200_rx_buffer_index++] = mdc1200_sync_suc_xor[i] ^ (rx_sync_neg ? 0xFF : 0x00);
-        }
-#endif
     }
 
     if (rx_fifo_almost_full) {
         const uint16_t count = BK4819_ReadRegister(BK4819_REG_5E) & (7u << 0);  // almost full threshold
-#if defined(ENABLE_MDC1200)||defined(ENABLE_MESSENGER)
+#ifdef ENABLE_MESSENGER
         uint16_t read_reg[count];
-#endif
-#ifdef ENABLE_MDC1200
-
-        {
-
-            // fetch received packet data
-            for (int i = 0; i < count; i++) {
-                read_reg[i]=BK4819_ReadRegister(0x5F);
-                const uint16_t word =read_reg[i] ^ (rx_sync_neg ? 0xFFFF : 0x0000);
-
-
-                if (mdc1200_rx_buffer_index < sizeof(mdc1200_rx_buffer))
-                    mdc1200_rx_buffer[mdc1200_rx_buffer_index++] = (word >> 0) & 0xff;
-
-                if (mdc1200_rx_buffer_index < sizeof(mdc1200_rx_buffer))
-                    mdc1200_rx_buffer[mdc1200_rx_buffer_index++] = (word >> 8) & 0xff;
-#ifdef ENABLE_MESSENGER
-
-                  if (gFSKWriteIndex < sizeof(msgFSKBuffer))
-                    msgFSKBuffer[gFSKWriteIndex++] = validate_char((read_reg[i]  >> 0) & 0xff);
-                if (gFSKWriteIndex < sizeof(msgFSKBuffer))
-                    msgFSKBuffer[gFSKWriteIndex++] = validate_char((read_reg[i]  >> 8) & 0xff);
-#endif
-            }
-#ifdef ENABLE_MESSENGER
-
-            msgFSKBuffer[gFSKWriteIndex]='\0';
-#endif
-
-            if (mdc1200_rx_buffer_index >= sizeof(mdc1200_rx_buffer)) {
-
-
-                if (MDC1200_process_rx_data(
-                        mdc1200_rx_buffer,
-                        mdc1200_rx_buffer_index,
-                        &mdc1200_op,
-                        &mdc1200_arg,
-                        &mdc1200_unit_id)) {
-                    mdc1200_rx_ready_tick_500ms = 2 * 5;  // 6 second MDC display time
-                    gUpdateDisplay = true;
-
-                }
-
-                mdc1200_rx_buffer_index = 0;
-            }
-
-        }
 #endif
 
     }

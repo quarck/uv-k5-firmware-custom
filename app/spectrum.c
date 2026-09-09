@@ -244,7 +244,7 @@ static void ToggleTX(bool on) {
         BK4819_SetupPowerAmplifier(Txp[2], fMeasure);
 
 
-#if defined(ENABLE_MESSENGER) || defined(ENABLE_MDC1200)
+#ifdef ENABLE_MESSENGER
         enable_msg_rx(false);
 #endif
         //DTMF

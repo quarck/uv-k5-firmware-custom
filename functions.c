@@ -15,7 +15,6 @@
  */
 #include <stdint.h>
 #include <string.h>
-#include "app/mdc1200.h"
 #include "app/dtmf.h"
 
 #if defined(ENABLE_FMRADIO)
@@ -146,7 +145,7 @@ void FUNCTION_PowerSave() {
 void FUNCTION_Transmit() {
     // if DTMF is enabled when TX'ing, it changes the TX audio filtering !! .. 1of11
 
-#if defined(ENABLE_MESSENGER) || defined(ENABLE_MDC1200)
+#ifdef ENABLE_MESSENGER
     enable_msg_rx(false);
 #endif
 
@@ -200,30 +199,9 @@ void FUNCTION_Transmit() {
     BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, true);
 
     DTMF_Reply();
-#ifdef ENABLE_MDC1200
-#ifdef ENABLE_MESSENGER
-    if(!stop_mdc_flag){
-#endif
-    if ((gEeprom.ROGER == ROGER_MODE_MDC_HEAD || gEeprom.ROGER == ROGER_MODE_MDC_BOTH ||gEeprom.ROGER == ROGER_MODE_MDC_HEAD_ROGER)
-
-
-        ) {
-        BK4819_send_MDC1200(1, 0x80, gEeprom.MDC1200_ID, true);
-
-#ifdef ENABLE_MDC1200_SIDE_BEEP
-        BK4819_start_tone(880, 10, true, true);
-                                    SYSTEM_DelayMs(120);
-                                    BK4819_stop_tones(true);
-#endif
-    } else
-#endif
     if (gCurrentVfo->DTMF_PTT_ID_TX_MODE == PTT_ID_APOLLO)
         BK4819_PlaySingleTone(2525, 250, 0, gEeprom.DTMF_SIDE_TONE);
 #ifdef ENABLE_MESSENGER
-    #ifdef ENABLE_MDC1200
-
-    }
-    #endif
 
 #endif
 #if defined(ENABLE_ALARM) || defined(ENABLE_TX1750)

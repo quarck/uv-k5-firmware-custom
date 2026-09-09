@@ -86,7 +86,6 @@ enum {
     MENU_ANI_ID,
 #endif
 
-    MENU_MDC_ID,
 
 
     MENU_UPCODE,

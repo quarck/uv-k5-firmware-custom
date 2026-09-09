@@ -16,7 +16,6 @@
 #include "driver/bk4819-regs.h"
 #include "driver/bk4819.h"
 #include <stdint.h>
-#include "app/mdc1200.h"
 #include <string.h>
 #include "am_fix.h"
 #include "app/dtmf.h"
@@ -735,14 +734,12 @@ void RADIO_SetupRegisters(bool switchToForeground) {
     // enable/disable BK4819 selected interrupts
 
     //OK?
-#if defined(ENABLE_MESSENGER) || defined(ENABLE_MDC1200)
+#ifdef ENABLE_MESSENGER
     enable_msg_rx(true);
 #endif
 #ifdef ENABLE_MESSENGER
     InterruptMask |= BK4819_REG_3F_FSK_RX_SYNC | BK4819_REG_3F_FSK_RX_FINISHED | BK4819_REG_3F_FSK_FIFO_ALMOST_FULL | BK4819_REG_3F_FSK_TX_FINISHED;
 
-#elif defined(ENABLE_MDC1200)
-    InterruptMask |= BK4819_REG_3F_FSK_RX_SYNC | BK4819_REG_3F_FSK_RX_FINISHED | BK4819_REG_3F_FSK_FIFO_ALMOST_FULL;
 #endif
     BK4819_WriteRegister(BK4819_REG_3F, InterruptMask);
 

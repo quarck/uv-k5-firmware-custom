@@ -22,7 +22,6 @@
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
-#include "mdc1200.h"
 #include "app/action.h"
 
 #ifdef ENABLE_AIRCOPY
@@ -712,7 +711,7 @@ static void CheckRadioInterrupts(void) {
 
         //ok
 
-#if defined(ENABLE_MESSENGER) || defined(ENABLE_MDC1200)
+#ifdef ENABLE_MESSENGER
         solve_sign(interrupts.__raw);
 #endif
 
@@ -1340,17 +1339,6 @@ void APP_TimeSlice500ms(void) {
     if (gDTMF_RX_timeout > 0)
         if (--gDTMF_RX_timeout == 0)
             DTMF_clear_RX();
-#endif
-#ifdef ENABLE_MDC1200
-    if (mdc1200_rx_ready_tick_500ms > 0)
-        {
-            if (--mdc1200_rx_ready_tick_500ms == 0)
-            {
-                if (center_line == CENTER_LINE_MDC1200)
-                    center_line = CENTER_LINE_NONE;
-                gUpdateDisplay = true;
-            }
-        }
 #endif
 #ifdef ENABLE_FMRADIO
     if (gFmRadioCountdown_500ms > 0)

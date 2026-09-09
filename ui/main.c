@@ -14,7 +14,6 @@
  *     limitations under the License.
  */
 #include "app/action.h"
-#include "app/mdc1200.h"
 #include "chinese.h"
 #include <string.h>
 #include <stdlib.h>  // abs()
@@ -885,34 +884,6 @@ void UI_DisplayMain(void) {
     if (center_line == CENTER_LINE_NONE) {    // we're free to use the middle line
 
         const bool rx = FUNCTION_IsRx();
-#ifdef ENABLE_MDC1200
-
-        if (mdc1200_rx_ready_tick_500ms > 0) {
-            char mdc1200_contact[14];
-            center_line = CENTER_LINE_MDC1200;
-            uint8_t print_col = 0;
-            if (mdc1200_contact_find(mdc1200_unit_id, mdc1200_contact))//
-            {
-
-                memcpy(String, mdc1200_contact, 14);
-                String[14] = 0;
-                print_col = 29;
-            } else {
-                sprintf(String, "ID %04X", mdc1200_unit_id);
-                print_col = 40;
-            }
-
-//#ifdef ENABLE_MDC1200_SHOW_OP_ARG
-//                sprintf(String, "MDC1200 %02X %02X %04X", mdc1200_op, mdc1200_arg, mdc1200_unit_id);
-//#else
-//                sprintf(String, "MDC1200 ID %04X", mdc1200_unit_id);
-//#endif
-
-            UI_PrintStringSmall(String, print_col, 0, 3);
-
-
-        } else
-#endif
 
 //#ifdef ENABLE_AUDIO_BAR
         if (gCurrentFunction == FUNCTION_TRANSMIT) {

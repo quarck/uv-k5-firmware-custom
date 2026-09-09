@@ -35,7 +35,6 @@
 #include <string.h>
 #include "font.h"
 #include <stdio.h>     // NULL
-#include "app/mdc1200.h"
 #include "app/uart.h"
 #include "string.h"
 #include "app/messenger.h"
@@ -151,9 +150,6 @@ void Main(void) {
     SETTINGS_LoadCalibration();
 #ifdef ENABLE_MESSENGER
     MSG_Init();
-#endif
-#ifdef ENABLE_MDC1200
-    MDC1200_init();
 #endif
 //    char name[10]="START6789";
 //    EEPROM_WriteBuffer(0x02BA0,name,10);

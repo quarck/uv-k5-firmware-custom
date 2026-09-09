@@ -121,12 +121,7 @@ typedef enum ALARM_Mode_t ALARM_Mode_t;
 
 enum ROGER_Mode_t {
     ROGER_MODE_OFF = 0,
-    ROGER_MODE_ROGER,
-    ROGER_MODE_MDC_END,
-    ROGER_MODE_MDC_HEAD,
-    ROGER_MODE_MDC_BOTH,
-    ROGER_MODE_MDC_HEAD_ROGER
-
+    ROGER_MODE_ROGER
 };
 typedef enum ROGER_Mode_t ROGER_Mode_t;
 
@@ -273,7 +268,6 @@ typedef struct {
     uint8_t               S0_LEVEL;
 	uint8_t               S9_LEVEL;
 #endif
-    uint32_t MDC1200_ID;
 } EEPROM_Config_t;
 
 extern EEPROM_Config_t gEeprom;

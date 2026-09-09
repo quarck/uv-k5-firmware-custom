@@ -115,7 +115,6 @@ void SETTINGS_InitEEPROM(void)
     EEPROM_ReadBuffer(0x0E90, Data, 8);
     gEeprom.BEEP_CONTROL                 = Data[0] & 1;
 
-    gEeprom.MDC1200_ID     =((uint16_t) (Data[2] << 8))|((uint16_t)(Data[1] ));
 //    gEeprom.KEY_1_LONG_PRESS_ACTION      = (Data[2] < ACTION_OPT_LEN) ? Data[2] : ACTION_OPT_FLASHLIGHT;
 //    gEeprom.KEY_2_SHORT_PRESS_ACTION     = (Data[3] < ACTION_OPT_LEN) ? Data[3] : ACTION_OPT_SCAN;
     gEeprom.CW_PITCH                     = (Data[3] < 120)            ? Data[3] : 70;
@@ -162,7 +161,7 @@ void SETTINGS_InitEEPROM(void)
 #ifdef ENABLE_ALARM
     gEeprom.ALARM_MODE                 = (Data[0] <  2) ? Data[0] : true;
 #endif
-    gEeprom.ROGER                          = (Data[1] <  6) ? Data[1] : ROGER_MODE_OFF;
+    gEeprom.ROGER                          = (Data[1] <  2) ? Data[1] : ROGER_MODE_OFF;
     gEeprom.REPEATER_TAIL_TONE_ELIMINATION = (Data[2] < 11) ? Data[2] : 0;
     gEeprom.TX_VFO                         = (Data[3] <  2) ? Data[3] : 0;
     gEeprom.BATTERY_TYPE                   = (Data[4] < BATTERY_TYPE_UNKNOWN) ? Data[4] : BATTERY_TYPE_1600_MAH;
@@ -540,12 +539,8 @@ void SETTINGS_SaveSettings(void)
 
     State[0] = gEeprom.BEEP_CONTROL;
    // State[0] |= 0;//gEeprom.KEY_M_LONG_PRESS_ACTION << 1;
-//    State[1]=(uint8_t)(gEeprom.MDC1200_ID&(0x000000ff));
-//    State[2]=(uint8_t)((gEeprom.MDC1200_ID&0x0000ff00)>>8);
-//    State[3]=(uint8_t)((gEeprom.MDC1200_ID&0x00ff0000)>>16);
-//    State[4]=(uint8_t)((gEeprom.MDC1200_ID&0xff000000)>>24);
-    State[1]=(uint8_t)(gEeprom.MDC1200_ID&(0x00ff));
-    State[2]=(uint8_t)((gEeprom.MDC1200_ID&(0xff00))>>8);
+    State[1] = 0;  // was MDC1200 ID, low byte
+    State[2] = 0;  // was MDC1200 ID, high byte
 
     // State[1] = 0;//gEeprom.KEY_1_SHORT_PRESS_ACTION;
    // State[2] = 0;//gEeprom.KEY_1_LONG_PRESS_ACTION;

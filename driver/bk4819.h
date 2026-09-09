@@ -164,14 +164,12 @@ void     BK4819_PrepareFSKReceive(void);
 void BK4819_PlayRoger(void);
 
  void    BK4819_PlayRogerNormal(void);
-void     BK4819_PlayRogerMDC(void);
 	    
 void     BK4819_Enable_AfDac_DiscMode_TxDsp(void);
 	    
 void     BK4819_GetVoxAmp(uint16_t *pResult);
 void     BK4819_SetScrambleFrequencyControlWord(uint32_t Frequency);
 void     BK4819_PlayDTMFEx(bool bLocalLoopback, char Code);
-void BK4819_send_MDC1200(const uint8_t op, const uint8_t arg, const uint16_t id, const bool long_preamble);
 
 void BK4819_stop_tones(const bool tx);
 void BK4819_start_tone(const uint16_t frequency, const unsigned int level, const bool tx, const bool tx_mute);
