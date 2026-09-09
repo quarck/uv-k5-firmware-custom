@@ -45,6 +45,7 @@
 #include "driver/backlight.h"
 #include "functions.h"
 #include "misc.h"
+#include "radio.h"
 #include "settings.h"
 #include "ui/inputbox.h"
 #include "ui/ui.h"
@@ -60,6 +61,97 @@ inline static void ACTION_1750() { ACTION_AlarmOr1750(true); };
 #endif
 
 inline static void ACTION_ScanRestart() { ACTION_Scan(true); };
+
+#ifdef ENABLE_SQL_ADJUST
+
+bool     gSqlAdjustMode;
+uint16_t gSqlAdjustCountdown_10ms;
+
+// squelch level when the overlay was opened, so that leaving it without an
+// actual change costs no EEPROM write
+static uint8_t sqlLevelOnEntry;
+
+// Push the new squelch straight into the BK4819 so the user hears the effect
+// while turning. This deliberately skips the full VFO reconfigure the menu
+// does -- that one re-tunes the radio and clicks the audio on every step.
+static void SQL_ADJUST_Apply(void) {
+    RADIO_ConfigureSquelchAndOutputPower(gRxVfo);
+    BK4819_SetupSquelch(
+            gRxVfo->SquelchOpenRSSIThresh, gRxVfo->SquelchCloseRSSIThresh,
+            gRxVfo->SquelchOpenNoiseThresh, gRxVfo->SquelchCloseNoiseThresh,
+            gRxVfo->SquelchCloseGlitchThresh, gRxVfo->SquelchOpenGlitchThresh);
+}
+
+void ACTION_SqlAdjust(void) {
+    // only the main screen draws the overlay and routes keys into it
+    if (gScreenToDisplay != DISPLAY_MAIN)
+        return;
+
+    gSqlAdjustMode = true;
+    sqlLevelOnEntry = gEeprom.SQUELCH_LEVEL;
+    gSqlAdjustCountdown_10ms = SQL_ADJUST_TIMEOUT_10MS;
+    gUpdateDisplay = true;
+}
+
+void SQL_ADJUST_Exit(void) {
+    if (!gSqlAdjustMode)
+        return;
+
+    gSqlAdjustMode = false;
+
+    if (gEeprom.SQUELCH_LEVEL != sqlLevelOnEntry) {
+        SETTINGS_SaveSettings();
+        // bring both VFOs back in step with the new level
+        gVfoConfigureMode = VFO_CONFIGURE;
+    }
+
+    gUpdateDisplay = true;
+}
+
+void SQL_ADJUST_TimeSlice10ms(void) {
+    if (gSqlAdjustMode && gSqlAdjustCountdown_10ms > 0 && --gSqlAdjustCountdown_10ms == 0)
+        SQL_ADJUST_Exit();
+}
+
+bool SQL_ADJUST_ProcessKeys(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld) {
+    if (Key == KEY_PTT) {    // PTT always keeps its normal job
+        SQL_ADJUST_Exit();
+        return false;
+    }
+
+    gSqlAdjustCountdown_10ms = SQL_ADJUST_TIMEOUT_10MS;
+
+    if (Key == KEY_UP || Key == KEY_DOWN) {
+        if (bKeyPressed) {    // press and auto-repeat, not release
+            const uint8_t level = gEeprom.SQUELCH_LEVEL;
+
+            if (Key == KEY_UP) {
+                if (level < 9)
+                    gEeprom.SQUELCH_LEVEL = level + 1;
+            } else if (level > 0)
+                gEeprom.SQUELCH_LEVEL = level - 1;
+
+            if (gEeprom.SQUELCH_LEVEL != level) {
+                SQL_ADJUST_Apply();
+                gUpdateDisplay = true;
+
+                if (!bKeyHeld)    // as elsewhere, auto-repeat stays silent
+                    gBeepToPlay = BEEP_1KHZ_60MS_OPTIONAL;
+            } else if (!bKeyHeld)    // already at 0 or 9
+                gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
+        }
+        return true;
+    }
+
+    // Any other key closes the overlay on release. The one exception is the
+    // release that ends the MENU long press which opened it in the first place.
+    if (!bKeyPressed && !(Key == KEY_MENU && bKeyHeld))
+        SQL_ADJUST_Exit();
+
+    return true;
+}
+
+#endif
 
 void (*action_opt_table[])(void) = {
         [ACTION_OPT_NONE] = &FUNCTION_NOP,
@@ -110,7 +202,10 @@ void (*action_opt_table[])(void) = {
         [ACTION_OPT_WIDTH] = &ACTION_WIDTH,
 #ifdef ENABLE_SIDEFUNCTIONS_SEND
         [ACTION_OPT_SEND_CURRENT] = &ACTION_SEND_CURRENT,
-        [ACTION_OPT_SEND_OTHER] = &ACTION_SEND_OTHER
+        [ACTION_OPT_SEND_OTHER] = &ACTION_SEND_OTHER,
+#endif
+#ifdef ENABLE_SQL_ADJUST
+        [ACTION_OPT_SQL] = &ACTION_SqlAdjust,
 #endif
 };
 
@@ -346,6 +441,10 @@ void ACTION_Handle(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld) {
     }
 
     // held or released after short press beyond this point
+#ifdef ENABLE_SQL_ADJUST
+    if (funcShort != ACTION_OPT_SQL)
+        SQL_ADJUST_Exit();
+#endif
     action_opt_table[funcShort]();
 //	switch (funcShort)
 //	{

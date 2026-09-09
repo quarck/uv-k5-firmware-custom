@@ -13,6 +13,7 @@
  *     See the License for the specific language governing permissions and
  *     limitations under the License.
  */
+#include "app/action.h"
 #include "app/mdc1200.h"
 #include "chinese.h"
 #include <string.h>
@@ -390,6 +391,25 @@ void UI_DisplayMain(void) {
         ST7565_BlitFullScreen();
         return;
     }
+
+#ifdef ENABLE_SQL_ADJUST
+    if (gSqlAdjustMode) {    // squelch-adjust overlay, UP/DOWN are live
+        unsigned int i;
+
+        UI_PrintStringSmall(STR_SQUELCH_LEVEL, 0, LCD_WIDTH, 1);
+
+        for (i = 0; i < 10; i++)
+            String[i] = (i < gEeprom.SQUELCH_LEVEL) ? '=' : '-';
+        String[10] = ' ';
+        String[11] = '0' + gEeprom.SQUELCH_LEVEL;
+        String[12] = 0;
+
+        UI_PrintStringSmall(String, 0, LCD_WIDTH, 3);
+
+        ST7565_BlitFullScreen();
+        return;
+    }
+#endif
 
     unsigned int activeTxVFO = gRxVfoIsActive ? gEeprom.RX_VFO : gEeprom.TX_VFO;
     for (unsigned int vfo_num = 0; vfo_num < 2; vfo_num++) {

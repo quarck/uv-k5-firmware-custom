@@ -1132,6 +1132,10 @@ void APP_TimeSlice10ms(void) {
 //#endif
     }
 
+#ifdef ENABLE_SQL_ADJUST
+    SQL_ADJUST_TimeSlice10ms();
+#endif
+
     if (gUpdateDisplay) {
         gUpdateDisplay = false;
         GUI_DisplayScreen();

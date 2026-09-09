@@ -52,6 +52,8 @@ ENABLE_UART_RW_BK_REGS 		  ?= 0
 ENABLE_EEPROM_32BIT           ?= 1
 # Receive-only build: PTT never keys the transmitter.
 ENABLE_TX_BLOCKED             ?= 0
+# Side-function that opens a squelch-adjust overlay driven by UP/DOWN.
+ENABLE_SQL_ADJUST             ?= 1
 ENABLE_AUDIO_BAR_DEFAULT      ?= 0
 ENABLE_EEPROM_TYPE        	   = 0
 ENABLE_CHINESE_FULL 		   = 0
@@ -486,6 +488,14 @@ ifeq ($(ENABLE_EEPROM_32BIT),1)
 endif
 ifeq ($(ENABLE_TX_BLOCKED),1)
 	CFLAGS  += -DENABLE_TX_BLOCKED
+endif
+# The overlay is only reachable through the side-function menu, so it would be
+# dead weight without it.
+ifeq ($(ENABLE_CUSTOM_SIDEFUNCTIONS),0)
+	ENABLE_SQL_ADJUST = 0
+endif
+ifeq ($(ENABLE_SQL_ADJUST),1)
+	CFLAGS  += -DENABLE_SQL_ADJUST
 endif
 ifeq ($(ENABLE_BIG_FREQ),1)
 	CFLAGS  += -DENABLE_BIG_FREQ

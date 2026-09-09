@@ -808,6 +808,11 @@ void MAIN_ProcessKeys(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld) {
 //		Key = KEY_SIDE2;      // what's this doing ???
 //	}
 
+#ifdef ENABLE_SQL_ADJUST
+    if (gSqlAdjustMode && SQL_ADJUST_ProcessKeys(Key, bKeyPressed, bKeyHeld))
+        return;
+#endif
+
     switch (Key) {
         case KEY_0...KEY_9:
             MAIN_Key_DIGITS(Key, bKeyPressed, bKeyHeld);

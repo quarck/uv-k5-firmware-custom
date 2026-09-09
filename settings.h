@@ -97,6 +97,9 @@ enum ACTION_OPT_t {
     ACTION_OPT_SEND_CURRENT,
     ACTION_OPT_SEND_OTHER,
 #endif
+#ifdef ENABLE_SQL_ADJUST
+    ACTION_OPT_SQL,
+#endif
     ACTION_OPT_LEN
 };
 

@@ -55,5 +55,22 @@ void ACTION_Handle(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld);
 void ACTION_SEND_CURRENT(void);
 void ACTION_SEND_OTHER(void);
 #endif
+
+#ifdef ENABLE_SQL_ADJUST
+// Squelch-adjust overlay: a side function latches it, UP/DOWN then step the
+// squelch one point at a time until any other key or the inactivity timeout
+// closes it again.
+#define SQL_ADJUST_TIMEOUT_10MS 300   // 3 s of no keys closes the overlay
+
+extern bool     gSqlAdjustMode;
+extern uint16_t gSqlAdjustCountdown_10ms;
+
+void ACTION_SqlAdjust(void);
+void SQL_ADJUST_Exit(void);
+void SQL_ADJUST_TimeSlice10ms(void);
+// true when the key belongs to the overlay and must not be handled elsewhere
+bool SQL_ADJUST_ProcessKeys(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld);
+#endif
+
 #endif
 
