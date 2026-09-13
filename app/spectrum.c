@@ -95,6 +95,38 @@ uint32_t fMeasure = 0;
 uint32_t currentFreq, tempFreq;
 uint16_t rssiHistory[128];
 
+// Max-hold outline: a sliding maximum over the last 5-10 s, kept as two
+// buckets rather than a ring of frames. Every 5 s the open bucket ages into
+// the closed one and a fresh one opens, so what is drawn always covers at
+// least the last 5 s and at most the last 10 s.
+//
+// Held as screen rows, not RSSI - the row is already computed for the live
+// bar, so the outline costs no extra Rssi2Y. A row only means anything while
+// the dB scale stands still, which is why this is drawn in manual dB only and
+// thrown away on a dbMax change, a window change, or the auto/manual toggle.
+//
+// It is NOT thrown away when settings.dbMin moves, tempting as that looks.
+// dbMin reads like a setting but is a per-sweep measurement: ResetScanStats()
+// clears scanInfo.rssiMin every sweep, so the first UpdateScanInfo() of each
+// sweep rewrites it. Watching it resets the hold around 3x/s and the window
+// collapses to well under a second - found on hardware, not in review. The
+// small scale drift under the held rows is the cheaper of the two errors.
+// HOLD_NONE is 0xFF, the same "nothing to draw" row RowFor() returns, which is
+// what lets the comparisons below stand in for the empty checks.
+#define HOLD_NONE         0xFFu
+#define HOLD_BUCKET_500MS 10u     // 5 s per bucket
+
+// [0] is the open bucket, [1] the one before it; both hold the strongest
+// (lowest) row seen.
+static uint8_t holdRow[2][128];
+static uint8_t holdTicks;         // 500 ms ticks since the bucket opened
+
+static void HoldReset(void)
+{
+    memset(holdRow, HOLD_NONE, sizeof(holdRow));
+    holdTicks = 0;
+}
+
 // Cached REG_30 value for scan steps: avoids re-reading it on every SetFScan()
 // call (saves 1 SPI read per step = fewer SPI bus events = less SPI-induced audio interference).
 static uint16_t scanReg30 = 0;
@@ -685,6 +717,10 @@ static void ResetBlacklist()
 
 static void RelaunchScan()
 {
+    // Rows are per bin, so they stop meaning anything once the window moves -
+    // centre, step or bin count.
+    HoldReset();
+
     InitScan();
     ResetPeak();
     ToggleRX(false);
@@ -900,6 +936,7 @@ static void UpdateDbMax(bool inc)
 {
     settings.dbMax = clamp(settings.dbMax + (inc ? 5 : -5),
                            settings.dbMin + 10, 10);
+    HoldReset();   // held rows were measured against the old top of scale
     ClampRssiTriggerLevel();
     manualDbMaxTimer = MANUAL_DBMAX_SWEEPS;
     redrawScreen = true;
@@ -1436,21 +1473,18 @@ static uint8_t GetBarCount()
                                              : (uint8_t)steps;
 }
 
-// Top of the bar for display column x, or 0xFF when there is nothing to draw.
 // Nearest neighbour on purpose: a column shows the sample it falls in and never
 // a value interpolated between two of them, so the display only ever shows what
 // was actually measured. For a power-of-two bar count this is the same mapping
 // as x >> stepsCount.
-static uint8_t BarTopY(uint8_t bars, uint8_t x)
+static uint8_t BinForColumn(uint8_t bars, uint8_t x)
 {
-    if (bars == 0)
-        return 0xFF;
-
     uint16_t i = ((uint16_t)x * bars) / 128u;
-    if (i >= bars)
-        i = bars - 1u;
+    return (i >= bars) ? (uint8_t)(bars - 1u) : (uint8_t)i;
+}
 
-    const uint16_t rssi = rssiHistory[i];
+static uint8_t RowFor(uint16_t rssi)
+{
     if (IsRssiHistoryInvalid(rssi))
         return 0xFF;
 
@@ -1458,19 +1492,55 @@ static uint8_t BarTopY(uint8_t bars, uint8_t x)
     return (y <= DrawingEndY) ? y : 0xFF;
 }
 
-// Solid bar from the measured level down to the baseline, one per column.
+// Top of the bar for display column x, or 0xFF when there is nothing to draw.
+static uint8_t BarTopY(uint8_t bars, uint8_t x)
+{
+    if (bars == 0)
+        return 0xFF;
+
+    return RowFor(rssiHistory[BinForColumn(bars, x)]);
+}
+
+// Solid bar from the measured level down to the baseline, one per column. In
+// manual dB the sliding maximum is drawn above it as a dotted outline; in auto
+// it is not drawn at all, because the scale moves under the held rows.
 static void DrawSpectrumBars()
 {
     const uint8_t bars = GetBarCount();
+    if (bars == 0)
+        return;
+
+    const bool hold = manualSetFlag;
 
     for (uint8_t x = 0; x < 128; x++)
     {
-        const uint8_t top = BarTopY(bars, x);
-        if (top == 0xFF)
+        const uint8_t i   = BinForColumn(bars, x);
+        const uint8_t top = RowFor(rssiHistory[i]);
+
+        if (top != 0xFF)
+        {
+            for (uint8_t y = top; y <= DrawingEndY; y++)
+                PutPixel(x, y, true);
+        }
+
+        if (!hold)
             continue;
 
-        for (uint8_t y = top; y <= DrawingEndY; y++)
-            PutPixel(x, y, true);
+        // Accumulating in the column loop rather than a bin loop of its own:
+        // every bin is covered by at least one column and the accumulator is a
+        // maximum, so revisiting a bin cannot change the result - and the
+        // separate loop costs flash this build has not got. A 0xFF top is never
+        // below a held row, so it drops out on its own.
+        if (top < holdRow[0][i])
+            holdRow[0][i] = top;    // lower row = stronger signal
+
+        // Dotted, the way the old peak-hold trace was drawn: on a 1-bit display
+        // that is what keeps it reading as a separate mark rather than a
+        // thicker bar top. h < top covers both "nothing held" (h is 0xFF, below
+        // nothing) and "the live bar already covers it".
+        const uint8_t h = (holdRow[0][i] < holdRow[1][i]) ? holdRow[0][i] : holdRow[1][i];
+        if (h < top && ((x + h) & 1) == 0)
+            PutPixel(x, h, true);
     }
 }
 
@@ -1637,6 +1707,7 @@ static void OnKeyDown(uint8_t key) {
     case KEY_MENU:
         // Short press toggles manual/auto.
         manualSetFlag = !manualSetFlag;
+        HoldReset();   // nothing was accumulated while in auto
         if (!manualSetFlag)
             settings.rssiTriggerLevel = RSSI_MAX_VALUE;
         redrawStatus = true;
@@ -2307,11 +2378,20 @@ static void Tick()
     }
 #endif
 
-#ifdef ENABLE_SCAN_RANGES
     if (gNextTimeslice_500ms)
     {
         gNextTimeslice_500ms = false;
 
+        // Wall clock, not sweeps: the window stays 5-10 s whatever the bin
+        // count and scan speed do.
+        if (manualSetFlag && ++holdTicks >= HOLD_BUCKET_500MS)
+        {
+            holdTicks = 0;
+            memcpy(holdRow[1], holdRow[0], sizeof(holdRow[0]));
+            memset(holdRow[0], HOLD_NONE, sizeof(holdRow[0]));
+        }
+
+#ifdef ENABLE_SCAN_RANGES
         // For large scans (>128 steps), refresh display periodically but
         // wait for the full sweep to complete before triggering listen mode.
         // This avoids showing stale rssiHistory data from a previous sweep.
@@ -2320,8 +2400,8 @@ static void Tick()
             redrawScreen = true;
             preventKeypress = false;
         }
-    }
 #endif
+    }
 
     if (!preventKeypress)
     {
