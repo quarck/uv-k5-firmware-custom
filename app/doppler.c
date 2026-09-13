@@ -114,3 +114,19 @@ void READ_DATA(int32_t time_diff, int32_t time_diff1) {
 
 
 }
+
+// Moved here from the old spectrum.c, which used to own the Doppler UI. The
+// vector in start.S is weak, so without a definition the RTC interrupt would
+// simply do nothing and the satellite tracking would stop advancing.
+void RTCHandler(void) {
+
+    RTC_Get();
+    int32_t NOW_UNIX_TIME = UNIX_TIME(time);
+    int32_t time_diff  = satellite.START_TIME_UNIX - NOW_UNIX_TIME; //卫星开始时间-现在时间 (satellite start time - current time)
+    int32_t time_diff1 = satellite.sum_time + time_diff;//结束-开始+开始-现在 (end - start + start - now)
+
+    READ_DATA(time_diff, time_diff1);
+
+    RTC_IF |= (1 << 5);//清除中断标志位 (clear the interrupt flag)
+
+}

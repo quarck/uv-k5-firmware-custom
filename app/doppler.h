@@ -29,4 +29,6 @@ int32_t UNIX_TIME(uint8_t time2[6]);
 extern struct satellite_d satellite_data;
 extern bool DOPPLER_FLAG;
 extern struct satellite_t satellite;
+
+void RTCHandler(void);
 #endif

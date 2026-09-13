@@ -17,6 +17,10 @@
 #ifndef SPECTRUM_H
 #define SPECTRUM_H
 
+#pragma once
+
+#include "keyboard_state.h"
+
 #include "../bitmaps.h"
 #include "../board.h"
 #include "../bsp/dp32g030/gpio.h"
@@ -38,66 +42,98 @@
 #include <stdint.h>
 #include <string.h>
 
-static const uint8_t DrawingEndY = 40;
+static const uint8_t DrawingEndY  = 40;
+static const uint8_t DrawingTopY  =  8;  // Reserve top 8px for frequency display (gFrameBuffer[0])
 
 static const uint8_t U8RssiMap[] = {
-        121, 115, 109, 103, 97, 91, 85, 79, 73, 63,
+    121,
+    115,
+    109,
+    103,
+    97,
+    91,
+    85,
+    79,
+    73,
+    63,
 };
 
 static const uint16_t scanStepValues[] = {
-        1, 10, 50, 100, 250, 500, 625, 833,
-        1000, 1250, 1500, 2000, 2500, 5000, 10000,
+    1,
+    10,
+    50,
+    100,
+    250,
+    500,
+    625,
+    833,
+    1000,
+    1250,
+    1500,
+    2000,
+    2500,
+    5000,
+    10000,
 };
 
 static const uint16_t scanStepBWRegValues[] = {
-        //     RX  RXw TX  BW
-        // 0b0 000 000 001 01 1000
-        // 1
-        0b0000000001011000, // 6.25
-        // 10
-        0b0000000001011000, // 6.25
-        // 50
-        0b0000000001011000, // 6.25
-        // 100
-        0b0000000001011000, // 6.25
-        // 250
-        0b0000000001011000, // 6.25
-        // 500
-        0b0010010001011000, // 6.25
-        // 625
-        0b0100100001011000, // 6.25
-        // 833
-        0b0110110001001000, // 6.25
-        // 1000
-        0b0110110001001000, // 6.25
-        // 1250
-        0b0111111100001000, // 6.25
-        // 2500
-        0b0011011000101000, // 25
-        // 10000
-        0b0011011000101000, // 25
+    //     RX  RXw TX  BW
+    // 0b0 000 000 001 01 1000
+    // 1    (S_STEP_0_01kHz, index 0)
+    0b0000000001011000, // 6.25
+    // 10   (S_STEP_0_1kHz,  index 1)
+    0b0000000001011000, // 6.25
+    // 50   (S_STEP_0_5kHz,  index 2)
+    0b0000000001011000, // 6.25
+    // 100  (S_STEP_1_0kHz,  index 3)
+    0b0000000001011000, // 6.25
+    // 250  (S_STEP_2_5kHz,  index 4)
+    0b0000000001011000, // 6.25
+    // 500  (S_STEP_5_0kHz,  index 5)
+    0b0010010001011000, // 6.25
+    // 625  (S_STEP_6_25kHz, index 6)
+    0b0100100001011000, // 6.25
+    // 833  (S_STEP_8_33kHz, index 7)
+    0b0110110001001000, // 6.25
+    // 1000 (S_STEP_10_0kHz, index 8)
+    0b0110110001001000, // 6.25
+    // 1250 (S_STEP_12_5kHz, index 9)
+    0b0111111100001000, // 6.25
+    // 1500 (S_STEP_15_0kHz, index 10)
+    0b0011011000101000, // 25
+    // 2000 (S_STEP_20_0kHz, index 11)
+    0b0011011000101000, // 25
+    // 2500 (S_STEP_25_0kHz, index 12)
+    0b0011011000101000, // 25
+    // 5000 (S_STEP_50_0kHz, index 13)
+    0b0011011000101000, // 25
+    // 10000 (S_STEP_100_0kHz, index 14)
+    0b0011011000101000, // 25
 };
 
 static const uint16_t listenBWRegValues[] = {
-        0b0011011000101000, // 25
-        0b0111111100001000, // 12.5
-        0b0100100001011000, // 6.25
+    0b0011011000101000, // 25
+    0b0111111100001000, // 12.5
+    0b0100100001011000, // 6.25
 };
 
-typedef enum State {
+typedef enum State
+{
     SPECTRUM,
     FREQ_INPUT,
     STILL,
 } State;
 
-typedef enum StepsCount {
+typedef enum StepsCount
+{
     STEPS_128,
     STEPS_64,
     STEPS_32,
     STEPS_16,
 } StepsCount;
 
-typedef enum ScanStep {
+typedef enum ScanStep
+{
     S_STEP_0_01kHz,
     S_STEP_0_1kHz,
     S_STEP_0_5kHz,
@@ -116,7 +152,8 @@ typedef enum ScanStep {
     S_STEP_100_0kHz,
 } ScanStep;
 
-typedef struct SpectrumSettings {
+typedef struct SpectrumSettings
+{
     uint32_t frequencyChangeStep;
     StepsCount stepsCount;
     ScanStep scanStepIndex;
@@ -130,23 +167,8 @@ typedef struct SpectrumSettings {
     bool backlightState;
 } SpectrumSettings;
 
-typedef enum {
-    KEY_STATE_IDLE,
-    KEY_STATE_PRESSED,
-    KEY_STATE_HELD,
-    KEY_STATE_RELEASED
-} KeyState_t;
-
-typedef struct KeyboardState {
-    KEY_Code_t current;
-    KEY_Code_t prev;
-    uint8_t counter;
-    KeyState_t state;
-    bool gRepeatHeld;
-
-} KeyboardState;
-
-typedef struct ScanInfo {
+typedef struct ScanInfo
+{
     uint16_t rssi, rssiMin, rssiMax;
     uint16_t i, iPeak;
     uint32_t f, fPeak;
@@ -154,29 +176,32 @@ typedef struct ScanInfo {
     uint16_t measurementsCount;
 } ScanInfo;
 
-typedef struct PeakInfo {
+typedef struct PeakInfo
+{
     uint16_t t;
     uint16_t rssi;
     uint32_t f;
     uint16_t i;
 } PeakInfo;
-extern uint32_t tempFreq;
-extern char freqInputString[11];
-extern uint8_t freqInputIndex ;
-extern uint8_t freqInputDotIndex ;
-extern State currentState , previousState ;
-void SetState(State state) ;
-void ResetFreqInput() ;
-void UpdateFreqInput(KEY_Code_t key) ;
- void RenderFreqInput() ;
- void FreqInput() ;
+
+void APP_RunSpectrum(void);
+
+// Reached into by the Si4732 app (app/si.c), which reuses the spectrum's
+// frequency entry and its battery indicator rather than carrying its own.
+extern uint32_t   tempFreq;
+extern char       freqInputString[11];
+extern uint8_t    freqInputIndex;
+extern uint8_t    freqInputDotIndex;
 extern KEY_Code_t freqInputArr[10];
- void APP_RunSpectrum(void);
- void DrawPower();
-#ifdef ENABLE_DOPPLER
-extern bool DOPPLER_MODE;
-void RTCHandler();
-#endif
+extern State      currentState, previousState;
+
+void SetState(State state);
+void ResetFreqInput(void);
+void UpdateFreqInput(KEY_Code_t key);
+void RenderFreqInput(void);
+void FreqInput(void);
+void DrawPower(void);
+
 #endif /* ifndef SPECTRUM_H */
 
 // vim: ft=c

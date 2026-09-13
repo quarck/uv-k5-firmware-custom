@@ -13,80 +13,46 @@
  *     See the License for the specific language governing permissions and
  *     limitations under the License.
  */
-//#define ENABLE_DOPPLER
-
-#include "functions.h"
-#include "stdbool.h"
-
-#ifdef ENABLE_DOPPLER
-
-#include "app/doppler.h"
-#include "bsp/dp32g030/rtc.h"
-
-#endif
+// Back-ported from the V3 firmware, where these two gate the current spectrum
+// behaviour rather than the older fagci one. V1 never tests them elsewhere, and
+// its ui/helper.h supplies the same PutPixel/GUI_DisplaySmallest this needs, so
+// turning them on here keeps the file close to its V3 original.
+#define ENABLE_FEAT_F4HWN
+#define ENABLE_FEAT_F4HWN_SPECTRUM
 
 #include "app/spectrum.h"
-#include "am_fix.h"
 #include "audio.h"
 #include "misc.h"
 
+#ifdef ENABLE_AM_FIX
+#include "am_fix.h"
+#endif
 
-//#define ENABLE_DOPPLER
 #ifdef ENABLE_SCAN_RANGES
 #include "chFrScanner.h"
 #endif
-
-#include "driver/eeprom.h"
 
 #include "driver/backlight.h"
 #include "frequencies.h"
 #include "ui/helper.h"
 #include "ui/main.h"
 
-static void ToggleRX(bool on);
-
-struct FrequencyBandInfo {
+struct FrequencyBandInfo
+{
     uint32_t lower;
     uint32_t upper;
     uint32_t middle;
 };
 
-int Mid(uint16_t *array, uint8_t n) {
-    int32_t sum = 0;
-    for (int i = 0; i < n; ++i) {
-        sum += array[i];
-    }
-    return sum / n;
-}
-//
-//static void UpdateBatteryInfo() {
-//    for (uint8_t i = 0; i < 4; i++) {
-//        BOARD_ADC_GetBatteryInfo(&gBatteryVoltages[i], &gBatteryCurrent);
-//    }
-//
-//    uint16_t voltage = Mid(gBatteryVoltages, ARRAY_SIZE(gBatteryVoltages));
-//    gBatteryDisplayLevel = 0;
-//
-//    for (int i = ARRAY_SIZE(gBatteryCalibration) - 1; i >= 0; --i) {
-//        if (gBatteryCalibration[i] < voltage) {
-//            gBatteryDisplayLevel = i + 1;
-//            break;
-//        }
-//    }
-//}
-
 #define F_MIN frequencyBandTable[0].lower
 #define F_MAX frequencyBandTable[BAND_N_ELEM - 1].upper
 
 const uint16_t RSSI_MAX_VALUE = 65535;
-int32_t time_diff, time_diff1;
+
 static uint32_t initialFreq;
 static char String[32];
-#ifdef ENABLE_DOPPLER
-bool DOPPLER_MODE = 0;
-#endif
-bool TX_ON = false;
-bool isInitialized = false;
+
+static bool isInitialized = false;
 bool isListening = true;
 bool monitorMode = false;
 bool redrawStatus = true;
@@ -96,38 +62,108 @@ bool preventKeypress = true;
 bool audioState = true;
 bool lockAGC = false;
 
-State currentState ,previousState ;
+State currentState = SPECTRUM, previousState = SPECTRUM;
 
 PeakInfo peak;
 ScanInfo scanInfo;
-KeyboardState kbd = {KEY_INVALID, KEY_INVALID, 0};
+static KeyboardState kbd = {KEY_INVALID, KEY_INVALID, 0};
+static bool menuKeyPendingShort = false;
+static bool menuKeyLongHandled = false;
 
 #ifdef ENABLE_SCAN_RANGES
 static uint16_t blacklistFreqs[15];
 static uint8_t blacklistFreqsIdx;
 #endif
 
-const char *bwOptions[] = {"  25k", "12.5k", "6.25k"};
+const char *const bwOptions[] = {"25", "12.5", "6.25"};
 const uint8_t modulationTypeTuneSteps[] = {100, 50, 10};
 const uint8_t modTypeReg47Values[] = {1, 7, 5};
 
 SpectrumSettings settings = {.stepsCount = STEPS_64,
-        .scanStepIndex = S_STEP_25_0kHz,
-        .frequencyChangeStep = 80000,
-        .scanDelay = 3200,
-        .rssiTriggerLevel = 150,
-        .backlightState = true,
-        .bw = BK4819_FILTER_BW_WIDE,
-        .listenBw = BK4819_FILTER_BW_WIDE,
-        .modulationType = false,
-        .dbMin = -130,
-        .dbMax = -50
-};
+                             .scanStepIndex = S_STEP_25_0kHz,
+                             .frequencyChangeStep = 80000,
+                             .scanDelay = 3200,
+                             .rssiTriggerLevel = 150,
+                             .backlightState = true,
+                             .bw = BK4819_FILTER_BW_WIDE,
+                             .listenBw = BK4819_FILTER_BW_WIDE,
+                             .modulationType = false,
+                             .dbMin = -130,
+                             .dbMax = -50};
 
 uint32_t fMeasure = 0;
 uint32_t currentFreq, tempFreq;
 uint16_t rssiHistory[128];
-int vfo;
+
+// Cached REG_30 value for scan steps: avoids re-reading it on every SetFScan()
+// call (saves 1 SPI read per step = fewer SPI bus events = less SPI-induced audio interference).
+static uint16_t scanReg30 = 0;
+
+// Bidirectional sweep: true = left→right (fStart→fEnd), false = right→left.
+static bool scanForward = true;
+// Alternate sweep start side across full sweep cycles to reduce directional bias.
+static bool scanStartFromLeft = true;
+// True until the opposite half-sweep is completed.
+static bool scanReturnPending = true;
+
+// Optional interlaced progression for large scans (>128 steps).
+// 1 = enabled, 0 = disabled.
+#ifndef SPECTRUM_INTERLACE_LARGE_SWEEPS
+#define SPECTRUM_INTERLACE_LARGE_SWEEPS 1
+#endif
+#if SPECTRUM_INTERLACE_LARGE_SWEEPS
+static uint16_t interlaceStride = 1;
+static uint16_t interlacePhase = 0;
+#endif
+
+// Incremental display: one framebuffer page sent per tick instead of a full
+// BlitFullScreen burst.
+static uint8_t renderPage = 0;
+
+// Decoupled render timer: Render() fires every RENDER_PERIOD_TICKS ticks
+// regardless of step count, keeping it above the ~9 Hz flutter-fusion
+// threshold that would cause an audible "tac" if tied to the sweep rate.
+static uint16_t renderTimer = 0;
+#define RENDER_PERIOD_TICKS 20
+
+// Disabling automatic DbMax and squelch trigger settings
+static bool manualSetFlag = false;
+
+typedef enum AutoSensitivityProfile
+{
+    AUTO_SENS_WEAK = 0,    // less sensitive (higher margin over noise)
+    AUTO_SENS_NORMAL,      // default
+    AUTO_SENS_STRONG,      // more sensitive (lower margin over noise)
+    AUTO_SENS_N_ELEM
+} AutoSensitivityProfile;
+
+// Margin above the measured noise floor used by auto trigger.
+// 1 RSSI unit ~= 0.5 dB.
+static const uint8_t autoTriggerMarginRssi[AUTO_SENS_N_ELEM] = {
+    24, // weak  : +12 dB
+    16, // normal:  +8 dB (legacy behavior)
+    10, // strong:  +5 dB
+};
+static const char *autoSensitivityLabel[AUTO_SENS_N_ELEM] = {"WEAK", "NORM", "STRG"};
+static AutoSensitivityProfile autoSensitivity = AUTO_SENS_NORMAL;
+
+// Hysteresis and debounce for listen state.
+// 1 RSSI unit ~= 0.5 dB.
+#define LISTEN_OPEN_HYST_RSSI    4   // +2 dB above trigger to open
+#define LISTEN_CLOSE_HYST_RSSI   4   // -2 dB below trigger to keep listening
+#define LISTEN_RELEASE_LOW_COUNT 4   // consecutive low reads before release
+#define LISTEN_DROP_EXIT_RSSI   20   // 10 dB abrupt drop => leave RX
+static uint8_t listenLowCount = 0;
+static uint16_t listenPrevRssi = RSSI_MAX_VALUE;
+static uint16_t autoNoiseFloor = RSSI_MAX_VALUE;
+
+// EMA-smoothed RSSI for STILL display only (peak.rssi stays raw for trigger)
+static uint16_t rssiSmoothed = 0;
+
+// Sweeps remaining before auto-scaling of dbMax resumes (0 = auto)
+static uint8_t manualDbMaxTimer = 0;
+#define MANUAL_DBMAX_SWEEPS 2
+uint8_t vfo;
 uint8_t freqInputIndex = 0;
 uint8_t freqInputDotIndex = 0;
 KEY_Code_t freqInputArr[10];
@@ -136,153 +172,74 @@ char freqInputString[11];
 uint8_t menuState = 0;
 uint16_t listenT = 0;
 
-RegisterSpec registerSpecs[] = {
-        {},
-        {"LNAs", BK4819_REG_13, 8, 0b11,   1},
-        {"LNA",  BK4819_REG_13, 5, 0b111,  1},
-        {"PGA",  BK4819_REG_13, 0, 0b111,  1},
-        {"IF",   BK4819_REG_3D, 0, 0xFFFF, 0x2aaa},
-        // {"MIX", 0x13, 3, 0b11, 1}, // '
+const RegisterSpec registerSpecs[] = {
+    {},
+    {"LNAs", BK4819_REG_13, 8, 0b11, 1},
+    {"LNA", BK4819_REG_13, 5, 0b111, 1},
+    {"PGA", BK4819_REG_13, 0, 0b111, 1},
+    //{"BPF", BK4819_REG_3D, 0, 0xFFFF, 0x2aaa},
+    // {"MIX", 0x13, 3, 0b11, 1}, // TODO: hidden
 };
 
-uint16_t statuslineUpdateTimer = 0;
-VfoState_t txAllowState;
-bool isTransmitting = false;
+#ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+const int8_t LNAsOptions[] = {-19, -16, -11, 0};
+const int8_t LNAOptions[] = {-24, -19, -14, -9, -6, -4, -2, 0};
+const int8_t VGAOptions[] = {-33, -27, -21, -15, -9, -6, -3, 0};
+//const char *BPFOptions[] = {"8.46", "7.25", "6.35", "5.64", "5.08", "4.62", "4.23"};
 
-static uint8_t DBm2S(int dbm) {
+typedef struct {
+    const int8_t *options;
+    uint8_t count;
+} MenuOptions;
+
+static const MenuOptions regOptions[] = {
+    {NULL, 0},             // NULL
+    {LNAsOptions, 4},      // LNAs
+    {LNAOptions, 8},       // LNA
+    {VGAOptions, 8}        // VGA
+};
+#endif
+
+uint16_t statuslineUpdateTimer = 0;
+
+#ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+#endif
+
+static uint8_t DBm2S(int dbm)
+{
     uint8_t i = 0;
     dbm *= -1;
-    for (i = 0; i < ARRAY_SIZE(U8RssiMap); i++) {
-        if (dbm >= U8RssiMap[i]) {
+    for (i = 0; i < ARRAY_SIZE(U8RssiMap); i++)
+    {
+        if (dbm >= U8RssiMap[i])
+        {
             return i;
         }
     }
     return i;
 }
 
-uint16_t registersVault[128] = {0};
-#ifdef ENABLE_DOPPLER
-
-static void RegBackup() {
-    for (int i = 0; i < 128; ++i) {
-        registersVault[i] = BK4819_ReadRegister(i);
-
-    }
-}
-#endif
-#ifdef ENABLE_DOPPLER
-static void RegRestore() {
-    for (int i = 0; i < 128; ++i) {
-        BK4819_WriteRegister(i, registersVault[i]);
-    }
-}
-#endif
-static void ToggleAudio(bool on) {
-//    if (on == audioState) {
-//        return;
-//    }
-//    audioState = on;
-    if (on) {
-        AUDIO_AudioPathOn();
-    } else {
-        AUDIO_AudioPathOff();
-    }
-}
-
-void SetTxF(uint32_t f, bool precise) {
-    BK4819_PickRXFilterPathBasedOnFrequency(f);
-    BK4819_SetFrequency(f);
-    uint16_t reg = BK4819_ReadRegister(BK4819_REG_30);
-    if (precise) {
-        BK4819_WriteRegister(BK4819_REG_30, 0x0200); // from radtel-rt-890-oefw
-    } else {
-        BK4819_WriteRegister(BK4819_REG_30, reg & ~BK4819_REG_30_ENABLE_VCO_CALIB);
-    }
-    BK4819_WriteRegister(BK4819_REG_30, reg);
-}
-
-#ifdef ENABLE_DOPPLER
-static void ToggleTX(bool on) {
-    if (isTransmitting == on) {
-        return;
-    }
-    isTransmitting = on;
-    if (on) {
-        ToggleRX(false);
-    }
-
-    BK4819_ToggleGpioOut(BK4819_GPIO5_PIN1_RED, on);
-
-    if (on) {
-        TX_ON=1;
-        fMeasure = satellite_data.UPLink;
-
-        AUDIO_AudioPathOff();
-
-        SetTxF(fMeasure, true);
-        RegBackup();
-
-        BK4819_WriteRegister(BK4819_REG_47, 0x6040);
-        BK4819_WriteRegister(BK4819_REG_7E, 0x302E);
-        BK4819_WriteRegister(BK4819_REG_50, 0x3B20);
-        BK4819_WriteRegister(BK4819_REG_37, 0x1D0F);
-        BK4819_WriteRegister(BK4819_REG_52, 0x028F);
-        BK4819_WriteRegister(BK4819_REG_30, 0x0000);
-        BK4819_WriteRegister(BK4819_REG_30, 0xC1FE);
-        BK4819_WriteRegister(BK4819_REG_51, 0x9033);
-
-        //亚音 (sub-audio tone (CTCSS/DCS))
-        if (satellite.SEND_CTCSS == 0)
-            BK4819_ExitSubAu();
-        else
-            BK4819_SetCTCSSFrequency(satellite.SEND_CTCSS);
-
-        //功率 (power)
-        FREQUENCY_Band_t Band = FREQUENCY_GetBand(fMeasure);
-        uint8_t Txp[3];
-        EEPROM_ReadBuffer(0x1ED0 + (Band * 16) + (OUTPUT_POWER_HIGH * 3), Txp, 3);
-        BK4819_SetupPowerAmplifier(Txp[2], fMeasure);
-
-
-#ifdef ENABLE_MESSENGER
-        enable_msg_rx(false);
-#endif
-        //DTMF
-        BK4819_DisableDTMF();
-        //加密 (scrambler)
-        BK4819_DisableScramble();
-    } else {
-        BK4819_GenTail(4); // CTC55
-        BK4819_WriteRegister(BK4819_REG_51, 0x904A);
-//        SYSTEM_DelayMs(200);
-        BK4819_SetupPowerAmplifier(0, 0);
-        RegRestore();
-//TODO:发射频率 (TX frequency)
-        fMeasure = satellite_data.DownLink;
-        SetTxF(fMeasure, true);
-                TX_ON=0;
-
-    }
-    BK4819_ToggleGpioOut(BK4819_GPIO0_PIN28_RX_ENABLE, !on);
-    BK4819_ToggleGpioOut(BK4819_GPIO1_PIN29_PA_ENABLE, on);
-}
-#endif
-
-static int Rssi2DBm(uint16_t rssi) {
+static int Rssi2DBm(uint16_t rssi)
+{
     return (rssi / 2) - 160 + dBmCorrTable[gRxVfo->Band];
 }
 
-static uint16_t GetRegMenuValue(uint8_t st) {
+static uint16_t GetRegMenuValue(uint8_t st)
+{
     RegisterSpec s = registerSpecs[st];
     return (BK4819_ReadRegister(s.num) >> s.offset) & s.mask;
 }
 
-void LockAGC() {
-    RADIO_SetupAGC(settings.modulationType == MODULATION_AM, lockAGC);
-    lockAGC = true;
+void LockAGC()
+{
+    //RADIO_SetupAGC(settings.modulationType == MODULATION_AM, lockAGC);
+    RADIO_SetupAGC(false, lockAGC);
+    //lockAGC = true;
+    lockAGC = false;
 }
 
-static void SetRegMenuValue(uint8_t st, bool add) {
+static void SetRegMenuValue(uint8_t st, bool add)
+{
     uint16_t v = GetRegMenuValue(st);
     RegisterSpec s = registerSpecs[st];
 
@@ -290,28 +247,76 @@ static void SetRegMenuValue(uint8_t st, bool add) {
         LockAGC();
 
     uint16_t reg = BK4819_ReadRegister(s.num);
-    if (add && v <= s.mask - s.inc) {
+    if (add && v <= s.mask - s.inc)
+    {
         v += s.inc;
-    } else if (!add && v >= 0 + s.inc) {
+    }
+    else if (!add && v >= 0 + s.inc)
+    {
         v -= s.inc;
     }
+    // TODO: use max value for bits count in max value, or reset by additional
     // mask in spec
     reg &= ~(s.mask << s.offset);
     BK4819_WriteRegister(s.num, reg | (v << s.offset));
     redrawScreen = true;
 }
 
+// GUI functions
+
+#ifndef ENABLE_FEAT_F4HWN
+static void PutPixel(uint8_t x, uint8_t y, bool fill)
+{
+    UI_DrawPixelBuffer(gFrameBuffer, x, y, fill);
+}
+static void PutPixelStatus(uint8_t x, uint8_t y, bool fill)
+{
+    UI_DrawPixelBuffer(&gStatusLine, x, y, fill);
+}
+#endif
+
+#ifndef ENABLE_FEAT_F4HWN
+static void GUI_DisplaySmallest(const char *pString, uint8_t x, uint8_t y,
+                                bool statusbar, bool fill)
+{
+    uint8_t c;
+    uint8_t pixels;
+    const uint8_t *p = (const uint8_t *)pString;
+
+    while ((c = *p++) && c != '\0')
+    {
+        c -= 0x20;
+        for (int i = 0; i < 3; ++i)
+        {
+            pixels = gFont3x5[c][i];
+            for (int j = 0; j < 6; ++j)
+            {
+                if (pixels & 1)
+                {
+                    if (statusbar)
+                        PutPixelStatus(x + i, y + j, fill);
+                    else
+                        PutPixel(x + i, y + j, fill);
+                }
+                pixels >>= 1;
+            }
+        }
+        x += 4;
+    }
+}
+#endif
 
 // Utility functions
 
-
-static int clamp(int v, int min, int max) {
+static int clamp(int v, int min, int max)
+{
     return v <= min ? min : (v >= max ? max : v);
 }
 
-static uint8_t my_abs(signed v) { return v > 0 ? v : -v; }
+static uint16_t my_abs(int16_t v) { return v < 0 ? (uint16_t)(-v) : (uint16_t)v; }
 
-void SetState(State state) {
+void SetState(State state)
+{
     previousState = currentState;
     currentState = state;
     redrawScreen = true;
@@ -320,7 +325,8 @@ void SetState(State state) {
 
 // Radio functions
 
-static void ToggleAFBit(bool on) {
+static void ToggleAFBit(bool on)
+{
     uint16_t reg = BK4819_ReadRegister(BK4819_REG_47);
     reg &= ~(1 << 8);
     if (on)
@@ -329,34 +335,40 @@ static void ToggleAFBit(bool on) {
 }
 
 static const BK4819_REGISTER_t registers_to_save[] = {
-//        BK4819_REG_30,
-//        BK4819_REG_37,
-//        BK4819_REG_3D,
-//        BK4819_REG_43,
-//        BK4819_REG_47,
-//        BK4819_REG_48,
-//        BK4819_REG_7E,
-
-        0x13, 0x30, 0x31, 0x37, 0x3D, 0x40, 0x43, 0x47, 0x48, 0x7D, 0x7E,
-
+    BK4819_REG_30,
+    BK4819_REG_37,
+    BK4819_REG_3D,
+    BK4819_REG_43,
+    BK4819_REG_47,
+    BK4819_REG_48,
+    BK4819_REG_7E,
 };
 
-static uint16_t registers_stack[sizeof(registers_to_save)];
+static uint16_t registers_stack[ARRAY_SIZE(registers_to_save)];
 
-static void BackupRegisters() {
-    for (uint32_t i = 0; i < ARRAY_SIZE(registers_to_save); i++) {
+static void BackupRegisters()
+{
+    for (uint32_t i = 0; i < ARRAY_SIZE(registers_to_save); i++)
+    {
         registers_stack[i] = BK4819_ReadRegister(registers_to_save[i]);
     }
 }
 
-static void RestoreRegisters() {
+static void RestoreRegisters()
+{
 
-    for (uint32_t i = 0; i < ARRAY_SIZE(registers_to_save); i++) {
+    for (uint32_t i = 0; i < ARRAY_SIZE(registers_to_save); i++)
+    {
         BK4819_WriteRegister(registers_to_save[i], registers_stack[i]);
     }
+
+#ifdef ENABLE_FEAT_F4HWN
+    gVfoConfigureMode = VFO_CONFIGURE;
+#endif
 }
 
-static void ToggleAFDAC(bool on) {
+static void ToggleAFDAC(bool on)
+{
     uint32_t Reg = BK4819_ReadRegister(BK4819_REG_30);
     Reg &= ~(1 << 9);
     if (on)
@@ -364,7 +376,15 @@ static void ToggleAFDAC(bool on) {
     BK4819_WriteRegister(BK4819_REG_30, Reg);
 }
 
-static void SetF(uint32_t f) {
+static uint32_t NormalizeScanFrequency(uint32_t f)
+{
+    const uint16_t step = scanStepValues[settings.scanStepIndex];
+    return (step == 833) ? FREQUENCY_RoundToStep(f, step) : f;
+}
+
+static void SetF(uint32_t f)
+{
+    f = NormalizeScanFrequency(f);
     fMeasure = f;
 
     BK4819_SetFrequency(fMeasure);
@@ -372,118 +392,288 @@ static void SetF(uint32_t f) {
     uint16_t reg = BK4819_ReadRegister(BK4819_REG_30);
     BK4819_WriteRegister(BK4819_REG_30, 0);
     BK4819_WriteRegister(BK4819_REG_30, reg);
+}
 
+// Lightweight frequency-set used during scanning.
+// Skips the band-select GPIO writes (band does not change within a sweep)
+// and uses a cached REG_30 value (read once in InitScan) instead of reading
+// it on every step.  Reduces per-step SPI transactions from ~7 to 4,
+// cutting the SPI bus activity that causes SPI-induced audio interference.
+static void SetFScan(uint32_t f)
+{
+    f = NormalizeScanFrequency(f);
 
+    // Refresh RF path only when crossing the VHF/UHF boundary (280 MHz)
+    if ((f < 28000000) != (fMeasure < 28000000))
+        BK4819_PickRXFilterPathBasedOnFrequency(f);
+    fMeasure = f;
+    BK4819_SetFrequency(f);
+    BK4819_WriteRegister(BK4819_REG_30, 0);
+    BK4819_WriteRegister(BK4819_REG_30, scanReg30);
 }
 
 // Spectrum related
 
-bool IsPeakOverLevel() { return peak.rssi >= settings.rssiTriggerLevel; }
+static bool IsPeakOverOpenLevel()
+{
+    uint16_t openLevel = settings.rssiTriggerLevel;
+    if (openLevel <= (uint16_t)(RSSI_MAX_VALUE - LISTEN_OPEN_HYST_RSSI))
+        openLevel += LISTEN_OPEN_HYST_RSSI;
+    else
+        openLevel = RSSI_MAX_VALUE;
 
-static void ResetPeak() {
-    peak.t = 0;
-    peak.rssi = 0;
+    return peak.rssi >= openLevel;
 }
 
-bool IsCenterMode() { return settings.scanStepIndex < S_STEP_2_5kHz; }
+static bool IsListeningSignalPresent(uint16_t rssi)
+{
+    uint16_t closeLevel = (settings.rssiTriggerLevel > LISTEN_CLOSE_HYST_RSSI)
+                              ? (uint16_t)(settings.rssiTriggerLevel - LISTEN_CLOSE_HYST_RSSI)
+                              : 0;
+    return rssi >= closeLevel;
+}
 
+static void ResetPeak()
+{
+    peak.t = 0;
+    peak.rssi = 0;
+    peak.f = 0;
+    peak.i = 0;
+}
+
+#ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+    static void setTailFoundInterrupt()
+    {
+        BK4819_WriteRegister(BK4819_REG_3F, BK4819_REG_3F_CxCSS_TAIL);
+    }
+
+    static bool checkIfTailFound()
+    {
+      uint16_t interrupt_status_bits;
+      // if interrupt waiting to be handled
+      if(BK4819_ReadRegister(BK4819_REG_0C) & 1u) {
+        // reset the interrupt
+        BK4819_WriteRegister(BK4819_REG_02, 0);
+        // fetch the interrupt status bits
+        interrupt_status_bits = BK4819_ReadRegister(BK4819_REG_02);
+        // End listen on CSS tail.
+        if (interrupt_status_bits & BK4819_REG_02_CxCSS_TAIL)
+        {
+            listenT = 0;
+            // disable interrupts
+            BK4819_WriteRegister(BK4819_REG_3F, 0);
+            // reset the interrupt
+            BK4819_WriteRegister(BK4819_REG_02, 0);
+            return true;
+        }
+      }
+      return false;
+    }
+#endif
+
+bool IsCenterMode() { return settings.scanStepIndex < S_STEP_2_5kHz; }
 // scan step in 0.01khz
 uint16_t GetScanStep() { return scanStepValues[settings.scanStepIndex]; }
 
-uint16_t GetStepsCount() {
+uint16_t GetStepsCount()
+{
 #ifdef ENABLE_SCAN_RANGES
-    if(gScanRangeStart) {
-        return (gScanRangeStop - gScanRangeStart) / GetScanStep();
+    if (gScanRangeStart)
+    {
+        uint32_t range = gScanRangeStop - gScanRangeStart;
+        uint16_t step = GetScanStep();
+        return (range / step) + 1;  // +1 to include up limit
     }
 #endif
     return 128 >> settings.stepsCount;
 }
 
-uint32_t GetBW() { return GetStepsCount() * GetScanStep(); }
+#ifdef ENABLE_SCAN_RANGES
+static uint16_t GetStepsCountDisplay()
+{
+    if (gScanRangeStart)
+    {
+        return (gScanRangeStop - gScanRangeStart) / GetScanStep();
+    }
+    return GetStepsCount();
+}
+#endif
 
-uint32_t GetFStart() {
+uint32_t GetBW() { return GetStepsCount() * GetScanStep(); }
+uint32_t GetFStart()
+{
     return IsCenterMode() ? currentFreq - (GetBW() >> 1) : currentFreq;
 }
 
-uint32_t GetFEnd() { return currentFreq + GetBW(); }
+uint32_t GetFEnd()
+{
+#ifdef ENABLE_SCAN_RANGES
+    if (gScanRangeStart)
+    {
+        return gScanRangeStop;
+    }
+#endif
+    return currentFreq + GetBW();
+}
 
-static void TuneToPeak() {
+static void TuneToPeak()
+{
     scanInfo.f = peak.f;
     scanInfo.rssi = peak.rssi;
     scanInfo.i = peak.i;
     SetF(scanInfo.f);
 }
 
-static void DeInitSpectrum() {
+static void DeInitSpectrum()
+{
     SetF(initialFreq);
     RestoreRegisters();
     isInitialized = false;
 }
 
-static uint8_t GetBWRegValueForScan() {
+uint8_t GetBWRegValueForScan()
+{
     return scanStepBWRegValues[settings.scanStepIndex];
 }
 
-static uint16_t GetRssi() {
-    // SYSTICK_DelayUs(800);
-    // testing autodelay based on Glitch value
-    while ((BK4819_ReadRegister(0x63) & 0b11111111) >= 255) {
-        SYSTICK_DelayUs(100);
+uint16_t GetRssi()
+{
+    // Wait for glitch to settle below threshold (not just < 255)
+    uint8_t guard = 50;
+    while (guard-- && (BK4819_ReadRegister(0x63) & 0xFF) >= 200)
+    {
+        SYSTICK_DelayUs(1);
     }
+    // Discard first read (AGC may still be transitioning), keep second
+    BK4819_GetRSSI();
     uint16_t rssi = BK4819_GetRSSI();
-#ifdef ENABLE_AM_FIX
-    if(settings.modulationType==MODULATION_AM && gSetting_AM_fix)
-        rssi += AM_fix_get_gain_diff()*2;
-#endif
     return rssi;
 }
 
-static void ToggleRX(bool on) {
-//    if(isTransmitting&&on)return;
-
-
-    isListening = on;
-#ifdef ENABLE_DOPPLER
-    if (DOPPLER_MODE && on) {
-        ToggleTX(false);
+static void ToggleAudio(bool on)
+{
+    if (on == audioState)
+    {
+        return;
     }
+    audioState = on;
+    if (on)
+    {
+        AUDIO_AudioPathOn();
+    }
+    else
+    {
+        AUDIO_AudioPathOff();
+    }
+}
 
-#endif
-    RADIO_SetupAGC(on, lockAGC);
+static void ToggleRX(bool on)
+{
+    #ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+    if (isListening == on) {
+        return;
+    }
+    #endif
+    isListening = on;
+
+    //RADIO_SetupAGC(settings.modulationType == MODULATION_AM, lockAGC);
+    RADIO_SetupAGC(false, lockAGC);
+
     BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, on);
 
     ToggleAudio(on);
     ToggleAFDAC(on);
     ToggleAFBit(on);
 
-    if (on) {
+    if (on)
+    {
+        listenLowCount = 0;
+        // Seed with the RSSI that opened the squelch so the very first measure
+        // can already detect an abrupt drop (quick-PTT case where the operator
+        // released before listen was actually engaged).
+        // listenPrevRssi = RSSI_MAX_VALUE; // previous behavior
+        listenPrevRssi = peak.rssi;
+    #ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+        listenT = 25;
+        BK4819_WriteRegister(0x43, listenBWRegValues[settings.listenBw]);
+        setTailFoundInterrupt();
+    #else
         listenT = 1000;
         BK4819_WriteRegister(0x43, listenBWRegValues[settings.listenBw]);
-    } else {
+    #endif
+    }
+    else
+    {
+        listenLowCount = 0;
+        listenPrevRssi = RSSI_MAX_VALUE;
         BK4819_WriteRegister(0x43, GetBWRegValueForScan());
     }
 }
 
 // Scan info
 
-static void ResetScanStats() {
+static void ResetScanStats()
+{
     scanInfo.rssi = 0;
     scanInfo.rssiMax = 0;
+    scanInfo.rssiMin = RSSI_MAX_VALUE;
     scanInfo.iPeak = 0;
     scanInfo.fPeak = 0;
 }
 
-static void InitScan() {
+// Resets scan position and stats without touching the radio — safe to call
+// on every sweep restart because scanReg30 and the RF filter path remain
+// valid as long as the scan range hasn't changed.
+static void InitScanPosition()
+{
     ResetScanStats();
-    scanInfo.i = 0;
-    scanInfo.f = GetFStart();
-
     scanInfo.scanStep = GetScanStep();
     scanInfo.measurementsCount = GetStepsCount();
+    bool startFromLeft = scanStartFromLeft;
+#if SPECTRUM_INTERLACE_LARGE_SWEEPS
+    interlacePhase = 0;
+    interlaceStride = 1;
+    if (scanInfo.measurementsCount > ARRAY_SIZE(rssiHistory))
+    {
+        // Keep interlaced scans deterministic from the left edge.
+        startFromLeft = true;
+        interlaceStride =
+            (scanInfo.measurementsCount + ARRAY_SIZE(rssiHistory) - 1) /
+            ARRAY_SIZE(rssiHistory);
+    }
+#endif
+    if (!startFromLeft && scanInfo.measurementsCount > 1)
+    {
+        scanInfo.i = scanInfo.measurementsCount - 1;
+        scanInfo.f = GetFEnd();
+        scanForward = false;
+    }
+    else
+    {
+        scanInfo.i = 0;
+        scanInfo.f = GetFStart();
+        scanForward = true;
+    }
+    scanReturnPending = scanInfo.measurementsCount > 1;
 }
 
-static void ResetBlacklist() {
-    for (int i = 0; i < 128; ++i) {
+static void InitScan()
+{
+    InitScanPosition();
+
+    // Cache the band-select LNA and REG_30 for the upcoming sweep.
+    // SetFScan() will use these cached values, saving 3 SPI ops per step.
+    // Mask bit 9 (AF DAC enable) so the cached value is always correct for
+    // scanning regardless of whether audio was on when InitScan() was called
+    // (RelaunchScan calls InitScan before ToggleRX(false)).
+    BK4819_PickRXFilterPathBasedOnFrequency(scanInfo.f);
+    scanReg30 = BK4819_ReadRegister(BK4819_REG_30) & ~(1u << 9);
+}
+
+static void ResetBlacklist()
+{
+    for (int i = 0; i < 128; ++i)
+    {
         if (rssiHistory[i] == RSSI_MAX_VALUE)
             rssiHistory[i] = 0;
     }
@@ -493,38 +683,90 @@ static void ResetBlacklist() {
 #endif
 }
 
-static void RelaunchScan() {
+static void RelaunchScan()
+{
     InitScan();
     ResetPeak();
     ToggleRX(false);
 #ifdef SPECTRUM_AUTOMATIC_SQUELCH
-    settings.rssiTriggerLevel = RSSI_MAX_VALUE;
+    if (!manualSetFlag)
+        settings.rssiTriggerLevel = RSSI_MAX_VALUE;
 #endif
     preventKeypress = true;
     scanInfo.rssiMin = RSSI_MAX_VALUE;
+
 }
 
-static void UpdateScanInfo() {
-    if (scanInfo.rssi > scanInfo.rssiMax) {
+static void UpdateScanInfo()
+{
+    if (scanInfo.rssi > scanInfo.rssiMax)
+    {
         scanInfo.rssiMax = scanInfo.rssi;
-        scanInfo.fPeak = scanInfo.f;
+        scanInfo.fPeak = NormalizeScanFrequency(scanInfo.f);
         scanInfo.iPeak = scanInfo.i;
     }
 
-    if (scanInfo.rssi < scanInfo.rssiMin) {
+    if (scanInfo.rssi < scanInfo.rssiMin)
+    {
         scanInfo.rssiMin = scanInfo.rssi;
         settings.dbMin = Rssi2DBm(scanInfo.rssiMin);
+        int dbMax = settings.dbMax - 10;
+        if (settings.dbMin > dbMax)
+            settings.dbMin = dbMax;
         redrawStatus = true;
     }
 }
 
-static void AutoTriggerLevel() {
-    if (settings.rssiTriggerLevel == RSSI_MAX_VALUE) {
-        settings.rssiTriggerLevel = clamp(scanInfo.rssiMax + 8, 0, RSSI_MAX_VALUE);
+static void AutoTriggerLevel()
+{
+    if (manualSetFlag)
+        return;
+
+    if (scanInfo.rssiMin == RSSI_MAX_VALUE)
+        return; // no valid measurement yet
+
+    // Lightweight floor tracking with tiny memory/code footprint.
+    // Uses current sweep min, smoothed across sweeps.
+    if (autoNoiseFloor == RSSI_MAX_VALUE || settings.rssiTriggerLevel == RSSI_MAX_VALUE)
+    {
+        autoNoiseFloor = scanInfo.rssiMin;
     }
+    else
+    {
+        autoNoiseFloor = (uint16_t)((3u * autoNoiseFloor + scanInfo.rssiMin + 2u) >> 2);
+    }
+
+    uint16_t target = autoNoiseFloor + autoTriggerMarginRssi[autoSensitivity];
+
+    uint16_t oldTrigger = settings.rssiTriggerLevel;
+
+    if (settings.rssiTriggerLevel == RSSI_MAX_VALUE)
+    {
+        // Fresh calibration (first sweep, or after step change): jump directly.
+        settings.rssiTriggerLevel = target;
+        redrawStatus = true;
+        return;
+    }
+
+    // Adaptive slew: follow noise floor changes with rate limiting.
+    // Faster convergence when the gap is large (e.g. after filter BW change).
+    int16_t diff  = (int16_t)target - (int16_t)settings.rssiTriggerLevel;
+    bool diffSign = diff < 0;
+    uint16_t absDiff = my_abs(diff);
+
+    if (absDiff > 4)
+    {
+        int16_t step = (absDiff > 12) ? 4 : ((absDiff > 6) ? 2 : 1);
+        settings.rssiTriggerLevel += diffSign ? -step : step;
+    }
+    // Dead zone ±4: hold steady to avoid jitter near target
+
+    if (settings.rssiTriggerLevel != oldTrigger)
+        redrawStatus = true;
 }
 
-static void UpdatePeakInfoForce() {
+static void UpdatePeakInfoForce()
+{
     peak.t = 0;
     peak.rssi = scanInfo.rssiMax;
     peak.f = scanInfo.fPeak;
@@ -532,77 +774,182 @@ static void UpdatePeakInfoForce() {
     AutoTriggerLevel();
 }
 
-static void UpdatePeakInfo() {
+static void UpdatePeakInfo()
+{
     if (peak.f == 0 || peak.t >= 1024 || peak.rssi < scanInfo.rssiMax)
         UpdatePeakInfoForce();
 }
 
-static void SetRssiHistory(uint16_t idx, uint16_t rssi) {
+static uint8_t GetHistorySlot(uint16_t idx)
+{
 #ifdef ENABLE_SCAN_RANGES
-    if(scanInfo.measurementsCount > 128) {
-        uint8_t i = (uint32_t)ARRAY_SIZE(rssiHistory) * 1000 / scanInfo.measurementsCount * idx / 1000;
-        if(rssiHistory[i] < rssi || isListening)
-            rssiHistory[i] = rssi;
-        rssiHistory[(i+1)%128] = 0;
+    if (scanInfo.measurementsCount > ARRAY_SIZE(rssiHistory))
+    {
+        uint32_t slot = (uint32_t)idx * ARRAY_SIZE(rssiHistory) / scanInfo.measurementsCount;
+        if (slot >= ARRAY_SIZE(rssiHistory))
+            slot = ARRAY_SIZE(rssiHistory) - 1;
+        return (uint8_t)slot;
+    }
+#endif
+    return (uint8_t)idx;
+}
+
+static void SetRssiHistory(uint16_t idx, uint16_t rssi)
+{
+    uint8_t slot = GetHistorySlot(idx);
+
+    if (rssi == RSSI_MAX_VALUE)
+    {
+        rssiHistory[slot] = RSSI_MAX_VALUE;
+        return;
+    }
+
+    uint16_t prev = rssiHistory[slot];
+
+#ifdef ENABLE_SCAN_RANGES
+    if (scanInfo.measurementsCount > ARRAY_SIZE(rssiHistory))
+    {
+        if (prev == RSSI_MAX_VALUE)
+            return;
+        // For large ranges: keep fast attack, soften decay to reduce flicker.
+        if (rssi >= prev)
+            rssiHistory[slot] = rssi;
+        else
+            rssiHistory[slot] = (uint16_t)((3u * prev + rssi) >> 2);
         return;
     }
 #endif
-    rssiHistory[idx] = rssi;
+    // Attack/decay: instant rise, fast fall for stable display
+    if (rssi >= prev) {
+        rssiHistory[slot] = rssi;              // Attack: instant
+    } else {
+        rssiHistory[slot] = (prev + rssi) >> 1; // Decay: halve the gap each sweep
+    }
 }
 
-static void Measure() {
+static void Measure()
+{
     uint16_t rssi = scanInfo.rssi = GetRssi();
     SetRssiHistory(scanInfo.i, rssi);
 }
 
+static void RequestAutoTriggerRecalibration()
+{
+    if (!manualSetFlag)
+    {
+        settings.rssiTriggerLevel = RSSI_MAX_VALUE;
+        autoNoiseFloor = RSSI_MAX_VALUE;
+    }
+}
+
+static void RearmRuntimeState()
+{
+    settings.dbMin = -128;
+    settings.dbMax = -97;
+    memset(rssiHistory, 0, sizeof(rssiHistory));
+    rssiSmoothed = 0;
+    manualDbMaxTimer = 0;
+    
+    RelaunchScan();
+
+    redrawScreen = true;
+    redrawStatus = true;
+}
+
+// Reset spectrum runtime/config to defaults while keeping current frequency
+// context (center/range). Persist only fields that are normally saved.
+// The settings a run starts from. Shared by entry and by the long-press reset,
+// so there is one definition of "default" rather than two that can drift.
+static void ApplyDefaultSettings()
+{
+    manualSetFlag = false;
+    autoSensitivity = AUTO_SENS_NORMAL;
+    monitorMode = false;
+    menuState = 0;
+    lockAGC = false;
+
+    settings.scanStepIndex = S_STEP_25_0kHz;
+    settings.stepsCount = STEPS_64;
+    settings.listenBw = BK4819_FILTER_BW_WIDE;
+    settings.modulationType = gTxVfo->Modulation;
+    settings.rssiTriggerLevel = RSSI_MAX_VALUE;
+    autoNoiseFloor = RSSI_MAX_VALUE;
+
+    settings.dbMax = -50;
+
+    // Keep frequency/range unchanged; recompute move step from fresh scan params.
+    settings.frequencyChangeStep = GetBW() >> 1;
+
+    ResetBlacklist();
+}
 // Update things by keypress
 
-static uint16_t dbm2rssi(int dBm) {
+static uint16_t dbm2rssi(int dBm)
+{
     return (dBm + 160 - dBmCorrTable[gRxVfo->Band]) * 2;
 }
 
-static void ClampRssiTriggerLevel() {
+static void ClampRssiTriggerLevel()
+{
     settings.rssiTriggerLevel =
-            clamp(settings.rssiTriggerLevel, dbm2rssi(settings.dbMin),
-                  dbm2rssi(settings.dbMax));
+        clamp(settings.rssiTriggerLevel, dbm2rssi(settings.dbMin),
+              dbm2rssi(settings.dbMax));
 }
 
-static void UpdateRssiTriggerLevel(bool inc) {
+static void UpdateDbMax(bool inc)
+{
+    settings.dbMax = clamp(settings.dbMax + (inc ? 5 : -5),
+                           settings.dbMin + 10, 10);
+    ClampRssiTriggerLevel();
+    manualDbMaxTimer = MANUAL_DBMAX_SWEEPS;
+    redrawScreen = true;
+    redrawStatus = true;
+}
+
+static void UpdateAutoSensitivity(bool inc)
+{
+    if (inc)
+    {
+        if (autoSensitivity < AUTO_SENS_STRONG)
+            autoSensitivity++;
+    }
+    else
+    {
+        if (autoSensitivity > AUTO_SENS_WEAK)
+            autoSensitivity--;
+    }
+
+    // Force immediate re-calibration to the new profile margin.
+    settings.rssiTriggerLevel = RSSI_MAX_VALUE;
+    redrawScreen = true;
+    redrawStatus = true;
+}
+
+static void UpdateRssiTriggerLevel(bool inc)
+{
     if (inc)
         settings.rssiTriggerLevel += 2;
     else
         settings.rssiTriggerLevel -= 2;
 
-    ClampRssiTriggerLevel();
+    if (settings.rssiTriggerLevel > dbm2rssi(settings.dbMax))
+        UpdateDbMax(true);
+    else
+        ClampRssiTriggerLevel();
 
     redrawScreen = true;
     redrawStatus = true;
 }
 
-static void UpdateDBMax(bool inc) {
-    uint8_t tmp = 12;
-#ifdef ENBALE_DOPPLER
-    if(DOPPLER_MODE) tmp=10;
-#endif
 
-    if (inc && settings.dbMax < 10) {
-        settings.dbMax += 1;
-    } else if (!inc && settings.dbMax > tmp + settings.dbMin) {
-        settings.dbMax -= 1;
-    } else {
-        return;
-    }
-
-    ClampRssiTriggerLevel();
-    redrawStatus = true;
-    redrawScreen = true;
-    SYSTEM_DelayMs(20);
-}
-
-static void UpdateScanStep(bool inc) {
-    if (inc) {
+static void UpdateScanStep(bool inc)
+{
+    if (inc)
+    {
         settings.scanStepIndex = settings.scanStepIndex != S_STEP_100_0kHz ? settings.scanStepIndex + 1 : 0;
-    } else {
+    }
+    else
+    {
         settings.scanStepIndex = settings.scanStepIndex != 0 ? settings.scanStepIndex - 1 : S_STEP_100_0kHz;
     }
 
@@ -612,12 +959,18 @@ static void UpdateScanStep(bool inc) {
     redrawScreen = true;
 }
 
-static void UpdateCurrentFreq(bool inc) {
-    if (inc && currentFreq < F_MAX) {
+static void UpdateCurrentFreq(bool inc)
+{
+    if (inc && currentFreq < F_MAX)
+    {
         currentFreq += settings.frequencyChangeStep;
-    } else if (!inc && currentFreq > F_MIN) {
+    }
+    else if (!inc && currentFreq > F_MIN)
+    {
         currentFreq -= settings.frequencyChangeStep;
-    } else {
+    }
+    else
+    {
         return;
     }
     RelaunchScan();
@@ -625,69 +978,124 @@ static void UpdateCurrentFreq(bool inc) {
     redrawScreen = true;
 }
 
-static void UpdateCurrentFreqStill(bool inc) {
+static void UpdateCurrentFreqStill(bool inc)
+{
     uint8_t offset = modulationTypeTuneSteps[settings.modulationType];
     uint32_t f = fMeasure;
-    if (inc && f < F_MAX) {
+    if (inc && f < F_MAX)
+    {
         f += offset;
-    } else if (!inc && f > F_MIN) {
+    }
+    else if (!inc && f > F_MIN)
+    {
         f -= offset;
     }
     SetF(f);
     redrawScreen = true;
 }
 
-static void UpdateFreqChangeStep(bool inc) {
+static void ResumeSweepInDirection(bool forward)
+{
+    ToggleRX(false);
+    ResetScanStats();
+    ResetPeak();
+    InitScanPosition();
+
+    if (forward || scanInfo.measurementsCount <= 1)
+    {
+        scanForward = true;
+        scanInfo.i = 0;
+        scanInfo.f = GetFStart();
+    }
+    else
+    {
+        scanForward = false;
+        scanInfo.i = scanInfo.measurementsCount - 1;
+        scanInfo.f = GetFEnd();
+    }
+
+    newScanStart = false;
+    preventKeypress = false;
+    redrawScreen = true;
+    redrawStatus = true;
+}
+
+static void UpdateFreqChangeStep(bool inc)
+{
     uint16_t diff = GetScanStep() * 4;
-    if (inc && settings.frequencyChangeStep < 200000) {
+    if (inc && settings.frequencyChangeStep < 200000)
+    {
         settings.frequencyChangeStep += diff;
-    } else if (!inc && settings.frequencyChangeStep > 10000) {
+    }
+    else if (!inc && settings.frequencyChangeStep > 10000)
+    {
         settings.frequencyChangeStep -= diff;
     }
     SYSTEM_DelayMs(100);
     redrawScreen = true;
 }
 
-static void ToggleModulation() {
-    if (settings.modulationType < MODULATION_UKNOWN - 1) {
+static void ToggleModulation()
+{
+    // Always leave listen mode before changing demod path.
+    // This prevents carrying a stale "locked RX" state across modulation
+    // changes (notably USB -> FM).
+    ToggleRX(false);
+
+    if (settings.modulationType < MODULATION_UKNOWN - 1)
+    {
         settings.modulationType++;
-    } else {
+    }
+    else
+    {
         settings.modulationType = MODULATION_FM;
     }
     RADIO_SetModulation(settings.modulationType);
 
-    RelaunchScan();
-    redrawScreen = true;
-#ifdef ENABLE_DOPPLER
-    if (DOPPLER_MODE) redrawStatus = true;
-#endif
+    // Re-arm runtime spectrum state for the new demodulation profile.
+    // USB and FM can have very different RSSI/noise floors, so keeping the
+    // previous history/levels can draw a persistent horizontal wall.
+    if (!manualSetFlag)
+        settings.rssiTriggerLevel = RSSI_MAX_VALUE;
+
+    RearmRuntimeState();
+    ResetBlacklist();
 }
 
-static void ToggleListeningBW() {
-    if (settings.listenBw == BK4819_FILTER_BW_NARROWER) {
+static void ToggleListeningBW()
+{
+    if (settings.listenBw == BK4819_FILTER_BW_NARROWER)
+    {
         settings.listenBw = BK4819_FILTER_BW_WIDE;
-    } else {
+    }
+    else
+    {
         settings.listenBw++;
     }
     redrawScreen = true;
-#ifdef ENABLE_DOPPLER
-    if (DOPPLER_MODE) redrawStatus = true;
-#endif
 }
 
-static void ToggleBacklight() {
+static void ToggleBacklight()
+{
     settings.backlightState = !settings.backlightState;
-    if (settings.backlightState) {
+    if (settings.backlightState)
+    {
         BACKLIGHT_TurnOn();
-    } else {
+    }
+    else
+    {
         BACKLIGHT_TurnOff();
     }
 }
 
-static void ToggleStepsCount() {
-    if (settings.stepsCount == STEPS_128) {
+static void ToggleStepsCount()
+{
+    if (settings.stepsCount == STEPS_128)
+    {
         settings.stepsCount = STEPS_16;
-    } else {
+    }
+    else
+    {
         settings.stepsCount--;
     }
     settings.frequencyChangeStep = GetBW() >> 1;
@@ -696,74 +1104,88 @@ static void ToggleStepsCount() {
     redrawScreen = true;
 }
 
- void ResetFreqInput() {
+void ResetFreqInput(void)
+{
     tempFreq = 0;
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 10; ++i)
+    {
         freqInputString[i] = '-';
     }
 }
 
- void FreqInput() {
+void FreqInput(void)
+{
     freqInputIndex = 0;
     freqInputDotIndex = 0;
     ResetFreqInput();
     SetState(FREQ_INPUT);
 }
 
-
- void UpdateFreqInput(KEY_Code_t key) {
-    if (key != KEY_EXIT && freqInputIndex >= 10) {
+void UpdateFreqInput(KEY_Code_t key)
+{
+    if (key != KEY_EXIT && freqInputIndex >= 10)
+    {
         return;
     }
-    if (key == KEY_STAR) {
-        if (freqInputIndex == 0 || freqInputDotIndex) {
+    if (key == KEY_STAR)
+    {
+        if (freqInputIndex == 0 || freqInputDotIndex)
+        {
             return;
         }
         freqInputDotIndex = freqInputIndex;
     }
-    if (key == KEY_EXIT) {
+    if (key == KEY_EXIT)
+    {
         freqInputIndex--;
         if (freqInputDotIndex == freqInputIndex)
             freqInputDotIndex = 0;
-    } else {
+    }
+    else
+    {
         freqInputArr[freqInputIndex++] = key;
     }
 
     ResetFreqInput();
 
     uint8_t dotIndex =
-            freqInputDotIndex == 0 ? freqInputIndex : freqInputDotIndex;
+        freqInputDotIndex == 0 ? freqInputIndex : freqInputDotIndex;
 
     KEY_Code_t digitKey;
-    for (int i = 0; i < 10; ++i) {
-        if (i < freqInputIndex) {
+    for (int i = 0; i < 10; ++i)
+    {
+        if (i < freqInputIndex)
+        {
             digitKey = freqInputArr[i];
-            freqInputString[i] = digitKey <= KEY_9 ? '0' + digitKey : '.';
-        } else {
+            freqInputString[i] = digitKey <= KEY_9 ? '0' + digitKey - KEY_0 : '.';
+        }
+        else
+        {
             freqInputString[i] = '-';
         }
     }
 
     uint32_t base = 100000; // 1MHz in BK units
-//#ifdef ENABLE_DOPPLER
-//    if(DOPPLER_MODE)base=1;
-//#endif
-    for (int i = dotIndex - 1; i >= 0; --i) {
-        tempFreq += (freqInputArr[i]) * base;
+    for (int i = dotIndex - 1; i >= 0; --i)
+    {
+        tempFreq += (freqInputArr[i] - KEY_0) * base;
         base *= 10;
     }
 
     base = 10000; // 0.1MHz in BK units
-    if (dotIndex < freqInputIndex) {
-        for (int i = dotIndex + 1; i < freqInputIndex; ++i) {
-            tempFreq += (freqInputArr[i]) * base;
+    if (dotIndex < freqInputIndex)
+    {
+        for (int i = dotIndex + 1; i < freqInputIndex; ++i)
+        {
+            tempFreq += (freqInputArr[i] - KEY_0) * base;
             base /= 10;
         }
     }
     redrawScreen = true;
 }
 
-static void Blacklist() {
+static void Blacklist()
+{
 #ifdef ENABLE_SCAN_RANGES
     blacklistFreqs[blacklistFreqsIdx++ % ARRAY_SIZE(blacklistFreqs)] = peak.i;
 #endif
@@ -777,16 +1199,38 @@ static void Blacklist() {
 #ifdef ENABLE_SCAN_RANGES
 static bool IsBlacklisted(uint16_t idx)
 {
-    for(uint8_t i = 0; i < ARRAY_SIZE(blacklistFreqs); i++)
-        if(blacklistFreqs[i] == idx)
-            return true;
+    if (blacklistFreqsIdx)
+        for (uint8_t i = 0; i < ARRAY_SIZE(blacklistFreqs); i++)
+            if (blacklistFreqs[i] == idx)
+                return true;
     return false;
 }
 #endif
 
 // Draw things
-// applied x2 to prevent initial rounding
-static uint8_t Rssi2PX(uint16_t rssi, uint8_t pxMin, uint8_t pxMax) {
+
+// Integer square root (for sugar map non-linear compression)
+static uint8_t iSqrt(uint16_t n)
+{
+    if (n == 0) return 0;
+    uint16_t x = n;
+    uint16_t y = (x + 1) >> 1;
+    while (y < x) { x = y; y = (x + n / x) >> 1; }
+    return (uint8_t)x;
+}
+
+static bool IsRssiHistoryInvalid(uint16_t rssi)
+{
+    // rssiHistory is cleared to 0 on (re)entry; treat it as "not measured yet"
+    // so the renderer does not draw an artificial horizontal baseline.
+    return rssi == 0 || rssi == RSSI_MAX_VALUE;
+}
+
+// applied x2 to prevent initial rounding.
+// A mild square-root compression (sugar map) is applied so that weak signals
+// occupy more of the display height while strong peaks are not clipped.
+uint8_t Rssi2PX(uint16_t rssi, uint8_t pxMin, uint8_t pxMax)
+{
     const int DB_MIN = settings.dbMin << 1;
     const int DB_MAX = settings.dbMax << 1;
     const int DB_RANGE = DB_MAX - DB_MIN;
@@ -795,24 +1239,28 @@ static uint8_t Rssi2PX(uint16_t rssi, uint8_t pxMin, uint8_t pxMax) {
 
     int dbm = clamp(Rssi2DBm(rssi) << 1, DB_MIN, DB_MAX);
 
-//    return ((dbm - DB_MIN) * PX_RANGE + DB_RANGE / 2) / DB_RANGE + pxMin;
-    return (dbm - DB_MIN) * PX_RANGE / DB_RANGE + pxMin;
+    // Linear 0..PX_RANGE position
+    uint8_t linear = (uint8_t)(((dbm - DB_MIN) * PX_RANGE + DB_RANGE / 2) / DB_RANGE);
+
+    // Square-root compression: sqrt(linear * PX_RANGE) rescaled to PX_RANGE
+    uint8_t compressed = iSqrt((uint16_t)linear * PX_RANGE);
+
+    // Blend 50/50 between linear and compressed for a subtle effect
+    return ((uint16_t)linear + compressed) / 2 + pxMin;
 }
 
-uint8_t Rssi2Y(uint16_t rssi) {
-    return DrawingEndY - Rssi2PX(rssi, 0, DrawingEndY);
+uint8_t Rssi2Y(uint16_t rssi)
+{
+    // Map into [DrawingTopY, DrawingEndY] so peaks never overdraw the
+    // frequency display rendered in gFrameBuffer[0] (pixels 0-7).
+    return DrawingEndY - Rssi2PX(rssi, 0, DrawingEndY - DrawingTopY);
 }
 
-static void DrawSpectrum() {
-    for (uint8_t x = 0; x < 128; ++x) {
-        uint16_t rssi = rssiHistory[x >> settings.stepsCount];
-        if (rssi != RSSI_MAX_VALUE) {
-            DrawVLine(Rssi2Y(rssi), DrawingEndY, x, true);
-        }
-    }
-}
-
-  void DrawPower() {
+// Battery indicator at the right-hand end of the status line. Kept separate
+// because the Si4732 app draws its own status line and calls this for the
+// battery.
+void DrawPower(void)
+{
     BOARD_ADC_GetBatteryInfo(&gBatteryVoltages[gBatteryCheckCounter++ % 4],
                              &gBatteryCurrent);
 
@@ -822,119 +1270,250 @@ static void DrawSpectrum() {
 
     unsigned perc = BATTERY_VoltsToPercent(voltage);
 
-    // sprintf(String, "%d %d", voltage, perc);
-    // GUI_DisplaySmallest(String, 48, 1, true, true);
-
     gStatusLine[116] = 0b00011100;
     gStatusLine[117] = 0b00111110;
-    for (int i = 118; i <= 126; i++) {
+    for (int i = 118; i <= 126; i++)
+    {
         gStatusLine[i] = 0b00100010;
     }
 
-    for (unsigned i = 127; i >= 118; i--) {
-        if (127 - i <= (perc + 5) * 9 / 100) {
+    for (unsigned i = 127; i >= 118; i--)
+    {
+        if (127 - i <= (perc + 5) * 9 / 100)
+        {
             gStatusLine[i] = 0b00111110;
         }
     }
 }
 
-static void DrawStatus() {
+static void DrawStatus()
+{
+    if (manualSetFlag)
+    {
+        char curStr[6];
+        char trigStr[6];
 
-#ifdef SPECTRUM_EXTRA_VALUES
-    sprintf(String, "%d/%d P:%d T:%d", settings.dbMin, settings.dbMax,
-          Rssi2DBm(peak.rssi), Rssi2DBm(settings.rssiTriggerLevel));
-#else
-    sprintf(String, "%d/%d", settings.dbMin, settings.dbMax);
-#endif
-#ifdef ENABLE_DOPPLER
+        if (IsRssiHistoryInvalid(scanInfo.rssi))
+            sprintf(curStr, "--");
+        else
+            sprintf(curStr, "%d", Rssi2DBm(scanInfo.rssi));
 
-    if (DOPPLER_MODE) {
-        //UI绘制 (UI: draw)状态栏 (UI: draw the status bar)
-        memset(gStatusLine, 0x7f, 39);
-        GUI_DisplaySmallest(satellite.name, 2, 1, true, false);
-        GUI_DisplaySmallest(String, 42 + (settings.dbMax > -100 ? 4 : 0), 1, true, true);
+        if (monitorMode || settings.rssiTriggerLevel == RSSI_MAX_VALUE)
+            sprintf(trigStr, "--");
+        else
+            sprintf(trigStr, "%d", Rssi2DBm(settings.rssiTriggerLevel));
 
-        sprintf(String, "%3s", gModulationStr[settings.modulationType]);
-        GUI_DisplaySmallest(String, 42 + 38, 1, true, true);
-
-        sprintf(String, "%s", bwOptions[settings.listenBw]);
-        GUI_DisplaySmallest(String, 42 + 53 - (settings.listenBw == 0 ? 8 : 0), 1, true, true);
-    } else {
-#endif
-    GUI_DisplaySmallest(String, 0, 1, true, true);
-#ifdef ENABLE_DOPPLER
+        sprintf(String, "M %s/%s", curStr, trigStr);
     }
-#endif
+    else
+    {
+        // In AUTO, keep mode/profile display only (no current/trigger pair).
+        sprintf(String, "A:%s %c", autoSensitivityLabel[autoSensitivity],
+                scanForward ? '>' : '<');
+    }
+    
+    GUI_DisplaySmallest(String, 0, 1, true, true);
 
     DrawPower();
-
 }
 
-static void DrawF(uint32_t f) {
-#ifdef ENABLE_DOPPLER
-    if (DOPPLER_MODE) {
-        //UI绘制 (UI: draw)
-        sprintf(String, "%03u.%05u", f / 100000, f % 100000);
+#ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+static void ShowChannelName(uint32_t f)
+{
+    static uint32_t channelF = 0;
+    static char channelName[12]; 
+    f = NormalizeScanFrequency(f);
 
-        UI_DisplayFrequency(String, 8, 0, false);
+    // Channel name starts at x=43 (fixed), leaving room for the dBm
+    // string on the left (max ~40 px) and battery indicator at x=116.
+    // Clear first so a shorter name doesn't leave stale pixels.
+    memset(&gStatusLine[43], 0, 116 - 43);
 
-    } else {
+    if (isListening)
+    {
+        if (f != channelF) {
+            channelF = f;
+            unsigned int i;
+            channelName[0] = 0;
+            for (i = 0; IS_MR_CHANNEL(i); i++)
+            {
+                if (RADIO_CheckValidChannel(i, false, 0))
+                {
+                    if (SETTINGS_FetchChannelFrequency(i) == channelF)
+                    {
+                        SETTINGS_FetchChannelName(channelName, i);
+                        break;
+                    }
+                }
+            }
+        }
+        if (channelName[0] != 0) {
+            UI_PrintStringSmallBuffer(channelName, gStatusLine + 43);
+        }
+    }
+
+    ST7565_BlitStatusLine();
+}
 #endif
-    sprintf(String, "%u.%05u", f / 100000, f % 100000);
-    UI_PrintStringSmall(String, 8, 127, 0);
 
+static void FormatFrequency(uint32_t freq, char *buffer) {
+    sprintf(buffer, "%u.%05u", freq / 100000, freq % 100000);
+}
+
+static void DrawF(uint32_t f)
+{
+    f = NormalizeScanFrequency(f);
+    FormatFrequency(f, String);
+    // Align frequency with channel name in status bar (both at x=43).
+    // Left-aligned (End == Start = 43) so it does not collide with BW at x=108.
+    UI_PrintStringSmall(String, 43, 43, 0);
 
     sprintf(String, "%3s", gModulationStr[settings.modulationType]);
     GUI_DisplaySmallest(String, 116, 1, false, true);
-    sprintf(String, "%s", bwOptions[settings.listenBw]);
+    sprintf(String, "%4sk", bwOptions[settings.listenBw]);
     GUI_DisplaySmallest(String, 108, 7, false, true);
-#ifdef ENABLE_DOPPLER
-    }
-#endif
 
+#ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+    ShowChannelName(f);
+#endif
 }
 
-static void DrawNums() {
+static void DrawNums()
+{
 
-    if (currentState == SPECTRUM) {
+    if (currentState == SPECTRUM)
+    {
+#ifdef ENABLE_SCAN_RANGES
+        sprintf(String, "%ux", gScanRangeStart ? GetStepsCountDisplay() : GetStepsCount());
+#else
         sprintf(String, "%ux", GetStepsCount());
+#endif
         GUI_DisplaySmallest(String, 0, 1, false, true);
         sprintf(String, "%u.%02uk", GetScanStep() / 100, GetScanStep() % 100);
         GUI_DisplaySmallest(String, 0, 7, false, true);
+
     }
 
-    if (IsCenterMode()) {
+    if (IsCenterMode())
+    {
         sprintf(String, "%u.%05u \x7F%u.%02uk", currentFreq / 100000,
                 currentFreq % 100000, settings.frequencyChangeStep / 100,
                 settings.frequencyChangeStep % 100);
         GUI_DisplaySmallest(String, 36, 49, false, true);
-    } else {
-        sprintf(String, "%u.%05u", GetFStart() / 100000, GetFStart() % 100000);
+    }
+    else
+    {
+        FormatFrequency(GetFStart(), String);
         GUI_DisplaySmallest(String, 0, 49, false, true);
 
-        sprintf(String, "\x7F%u.%02uk", settings.frequencyChangeStep / 100,
-                settings.frequencyChangeStep % 100);
+#ifdef ENABLE_SCAN_RANGES
+        if (gScanRangeStart)
+        {
+            // Scan-range mode: UP/DOWN are blocked, frequencyChangeStep is unused.
+            // Show the visible bandwidth instead, which is meaningful here.
+            uint32_t bw = gScanRangeStop - gScanRangeStart;
+            sprintf(String, "%u.%02uk", bw / 100, bw % 100);
+        }
+        else
+#endif
+        {
+            sprintf(String, "\x7F%u.%02uk", settings.frequencyChangeStep / 100,
+                    settings.frequencyChangeStep % 100);
+        }
         GUI_DisplaySmallest(String, 48, 49, false, true);
 
-        sprintf(String, "%u.%05u", GetFEnd() / 100000, GetFEnd() % 100000);
+        FormatFrequency(GetFEnd(), String);
         GUI_DisplaySmallest(String, 93, 49, false, true);
     }
 }
+// Number of RSSI samples held for the current sweep. A scan range can ask for
+// more measurements than the history has slots, in which case the sweep folds
+// them down (see GetHistorySlot) and 128 is the cap.
+static uint8_t GetBarCount()
+{
+    uint16_t steps = GetStepsCount();
+    return (steps > ARRAY_SIZE(rssiHistory)) ? ARRAY_SIZE(rssiHistory)
+                                             : (uint8_t)steps;
+}
 
-static void DrawRssiTriggerLevel() {
+// Top of the bar for display column x, or 0xFF when there is nothing to draw.
+// Nearest neighbour on purpose: a column shows the sample it falls in and never
+// a value interpolated between two of them, so the display only ever shows what
+// was actually measured. For a power-of-two bar count this is the same mapping
+// as x >> stepsCount.
+static uint8_t BarTopY(uint8_t bars, uint8_t x)
+{
+    if (bars == 0)
+        return 0xFF;
+
+    uint16_t i = ((uint16_t)x * bars) / 128u;
+    if (i >= bars)
+        i = bars - 1u;
+
+    const uint16_t rssi = rssiHistory[i];
+    if (IsRssiHistoryInvalid(rssi))
+        return 0xFF;
+
+    const uint8_t y = Rssi2Y(rssi);
+    return (y <= DrawingEndY) ? y : 0xFF;
+}
+
+// Solid bar from the measured level down to the baseline, one per column.
+static void DrawSpectrumBars()
+{
+    const uint8_t bars = GetBarCount();
+
+    for (uint8_t x = 0; x < 128; x++)
+    {
+        const uint8_t top = BarTopY(bars, x);
+        if (top == 0xFF)
+            continue;
+
+        for (uint8_t y = top; y <= DrawingEndY; y++)
+            PutPixel(x, y, true);
+    }
+}
+
+static uint8_t GetScanStepTextWidth()
+{
+    return (sprintf(NULL, "%u", GetScanStep() / 100) + 4) * 4; // "%u.%02uk", 4 px advance per char
+}
+
+static uint8_t GetBwTextWidth()
+{
+    return (strlen(bwOptions[settings.listenBw]) * 4) + 4; // 4 px advance per char
+}
+
+static void DrawRssiTriggerLevel()
+{
     if (settings.rssiTriggerLevel == RSSI_MAX_VALUE || monitorMode)
         return;
+    uint8_t scanStepTextWidth = GetScanStepTextWidth();
+    uint8_t bwTextWidth = GetBwTextWidth();
     uint8_t y = Rssi2Y(settings.rssiTriggerLevel);
-    for (uint8_t x = 0; x < 128; x += 2) {
+    const uint8_t bars = GetBarCount();
+    for (uint8_t x = 0; x < 128; x += 2)
+    {
+        // Skip columns the trace already covers, so the dotted line is not
+        // drawn on top of a bar.
+        const uint8_t top = BarTopY(bars, x);
+        if (top != 0xFF && top <= y + 1)
+            continue;
+        if (y <= 12 && (x < scanStepTextWidth + 2 || x >= 128 - bwTextWidth - 2))
+            continue;
+        if (gFrameBuffer[y / 8][x] & (1 << (y % 8)))
+            continue;
         PutPixel(x, y, true);
     }
 }
 
-static void DrawTicks() {
+static void DrawTicks()
+{
     uint32_t f = GetFStart();
     uint32_t span = GetFEnd() - GetFStart();
     uint32_t step = span / 128;
-    for (uint8_t i = 0; i < 128; i += (1 << settings.stepsCount)) {
+    for (uint8_t i = 0; i < 128; i += (1 << settings.stepsCount))
+    {
         f = GetFStart() + span * i / 128;
         uint8_t barValue = 0b00000001;
         (f % 10000) < step && (barValue |= 0b00000010);
@@ -945,10 +1524,13 @@ static void DrawTicks() {
     }
 
     // center
-    if (IsCenterMode()) {
+    if (IsCenterMode())
+    {
         memset(gFrameBuffer[5] + 62, 0x80, 5);
         gFrameBuffer[5][64] = 0xff;
-    } else {
+    }
+    else
+    {
         memset(gFrameBuffer[5] + 1, 0x80, 3);
         memset(gFrameBuffer[5] + 124, 0x80, 3);
 
@@ -957,719 +1539,883 @@ static void DrawTicks() {
     }
 }
 
-static void DrawArrow(uint8_t x) {
-    for (signed i = -2; i <= 2; ++i) {
+static void DrawArrow(uint8_t x)
+{
+    for (signed i = -2; i <= 2; ++i)
+    {
         signed v = x + i;
-        if (!(v & 128)) {
+        if (!(v & 128))
+        {
             gFrameBuffer[5][v] |= (0b01111000 << my_abs(i)) & 0b01111000;
         }
     }
 }
 
+static bool GetDirection(KEY_Code_t key) {
+    // V3 flips this pair through gEeprom.SET_NAV; V1 has no such setting.
+    return key == KEY_UP;
+}
+
+// Returns true if the key was handled (stop state-specific processing).
+static bool OnKeyDownCommon(uint8_t key) {
+    bool isTrue = (key == KEY_3 || key == KEY_STAR);
+
+    switch (key)
+    {
+    case KEY_3:
+    case KEY_9:
+        if (manualSetFlag)
+            UpdateDbMax(isTrue);
+        else
+            UpdateAutoSensitivity(isTrue);
+        return true;
+    case KEY_STAR:
+    case KEY_F:
+        UpdateRssiTriggerLevel(isTrue);
+        return true;
+    case KEY_0:
+        ToggleModulation();
+        return true;
+    case KEY_6:
+        ToggleListeningBW();
+        return true;
+    case KEY_SIDE2:
+        ToggleBacklight();
+        return true;
+    }
+    return false;
+}
+
 static void OnKeyDown(uint8_t key) {
-    switch (key) {
-        case KEY_3:
-            UpdateDBMax(true);
+    bool isTrue = (key == KEY_1 || key == KEY_2);
+
+    switch (key)
+    {
+    case KEY_1:
+    case KEY_7:
+        UpdateScanStep(isTrue);
+        break;
+    case KEY_2:
+    case KEY_8:
+        UpdateFreqChangeStep(isTrue);
+        break;
+    case KEY_UP:
+    case KEY_DOWN:
+        // If the spectrum is currently receiving (green LED on),
+        // force-stop RX and restart sweep in the requested direction.
+        if (isListening) {
+            ResumeSweepInDirection(GetDirection(key));
             break;
-        case KEY_9:
-            UpdateDBMax(false);
-            break;
-        case KEY_1:
-            UpdateScanStep(true);
-            break;
-        case KEY_7:
-            UpdateScanStep(false);
-            break;
-        case KEY_2:
-            UpdateFreqChangeStep(true);
-            break;
-        case KEY_8:
-            UpdateFreqChangeStep(false);
-            break;
-        case KEY_UP:
+        }
 #ifdef ENABLE_SCAN_RANGES
-            if(!gScanRangeStart)
+        if (!gScanRangeStart) {
 #endif
-                UpdateCurrentFreq(true);
-            break;
-        case KEY_DOWN:
+        UpdateCurrentFreq(GetDirection(key));
 #ifdef ENABLE_SCAN_RANGES
-            if(!gScanRangeStart)
+        }
 #endif
-                UpdateCurrentFreq(false);
-            break;
-        case KEY_SIDE1:
-            Blacklist();
-            break;
-        case KEY_STAR:
-            UpdateRssiTriggerLevel(true);
-            break;
-        case KEY_F:
-            UpdateRssiTriggerLevel(false);
-            break;
-        case KEY_5:
+        break;
+    case KEY_SIDE1:
+        Blacklist();
+        break;
+    case KEY_5:
 #ifdef ENABLE_SCAN_RANGES
-            if(!gScanRangeStart)
-
+        if (!gScanRangeStart)
 #endif
-                FreqInput();
-
-
-            break;
-        case KEY_0:
-            ToggleModulation();
-            break;
-        case KEY_6:
-            ToggleListeningBW();
-            break;
-        case KEY_4:
-#ifdef ENABLE_SCAN_RANGES
-            if(!gScanRangeStart)
-#endif
-                ToggleStepsCount();
-            break;
-        case KEY_SIDE2:
-            ToggleBacklight();
-            break;
-        case KEY_PTT:
-            SetState(STILL);
-            TuneToPeak();
-            break;
-        case KEY_MENU:
-            break;
-        case KEY_EXIT:
-            if (menuState) {
-                menuState = 0;
-                break;
-            }
-            DeInitSpectrum();
-            break;
-        default:
-            break;
-    }
-}
-
-static void OnKeyDownFreqInput(uint8_t key) {
-    switch (key) {
-        case KEY_0:
-        case KEY_1:
-        case KEY_2:
-        case KEY_3:
-        case KEY_4:
-        case KEY_5:
-        case KEY_6:
-        case KEY_7:
-        case KEY_8:
-        case KEY_9:
-        case KEY_STAR:
-            UpdateFreqInput(key);
-            break;
-        case KEY_EXIT:
-            if (freqInputIndex == 0) {
-                SetState(previousState);
-                break;
-            }
-            UpdateFreqInput(key);
-            break;
-        case KEY_MENU:
-#ifdef ENABLE_DOPPLER
-            if(DOPPLER_MODE)
-           {
-
-
-        time[3]=tempFreq/100000;
-        time[4]=(tempFreq/1000)%100;
-        time[5]=(tempFreq/10)%100;
-                        RTC_Set();
-                     SetState(previousState);
-
-                break;
-               }
-#endif
-            if (tempFreq < F_MIN || tempFreq > F_MAX) {
-                break;
-            }
-            SetState(previousState);
-            currentFreq = tempFreq;
-            if (currentState == SPECTRUM) {
-                ResetBlacklist();
-                RelaunchScan();
-            } else {
-                SetF(currentFreq);
-            }
-            break;
-        default:
-            break;
-    }
-}
-
-void OnKeyDownStill(KEY_Code_t key) {
-    switch (key) {
-        case KEY_3:
-            UpdateDBMax(true);
-            break;
-        case KEY_9:
-            UpdateDBMax(false);
-            break;
-        case KEY_UP:
-            if (menuState) {
-                SetRegMenuValue(menuState, true);
-                break;
-            }
-#ifdef ENABLE_DOPPLER
-            if (!DOPPLER_MODE)
-#endif
-            UpdateCurrentFreqStill(true);
-            break;
-        case KEY_DOWN:
-
-            if (menuState) {
-                SetRegMenuValue(menuState, false);
-                break;
-            }
-#ifdef ENABLE_DOPPLER
-            if (!DOPPLER_MODE)
-#endif
-            UpdateCurrentFreqStill(false);
-
-            break;
-        case KEY_STAR:
-            UpdateRssiTriggerLevel(true);
-            break;
-        case KEY_F:
-            UpdateRssiTriggerLevel(false);
-            break;
-        case KEY_5:
-//#ifdef ENABLE_DOPPLER
-//            if (DOPPLER_MODE) {
-//
-//
-//            } else
-//#endif
-
-
             FreqInput();
-
-
-            break;
-        case KEY_0:
-#ifdef ENABLE_DOPPLER
-            if (!DOPPLER_MODE)
+        break;
+    case KEY_4:
+#ifdef ENABLE_SCAN_RANGES
+        if (!gScanRangeStart)
 #endif
-            ToggleModulation();
-            break;
-        case KEY_6:
-#ifdef ENABLE_DOPPLER
-            if (!DOPPLER_MODE)
-#endif
-            ToggleListeningBW();
-            break;
-        case KEY_SIDE1:
-            monitorMode = !monitorMode;
-            break;
-        case KEY_SIDE2:
-            ToggleBacklight();
-            break;
-        case KEY_PTT:
-#ifdef ENABLE_DOPPLER
-            if (DOPPLER_MODE) {
-                ToggleTX(true);
-                redrawScreen = true;
-            }
-#endif
-            break;
-        case KEY_MENU:
-            if (menuState == ARRAY_SIZE(registerSpecs) - 1) {
-                menuState = 1;
-            } else {
-                menuState++;
-            }
-            redrawScreen = true;
-            break;
-        case KEY_EXIT:
-            if (!menuState) {
-                SetState(SPECTRUM);
-                lockAGC = false;
-                monitorMode = false;
-                RelaunchScan();
-
-#ifdef ENABLE_DOPPLER
-                if (DOPPLER_MODE)DeInitSpectrum();
-#endif
-
-
-                break;
-            }
+            ToggleStepsCount();
+        break;
+    case KEY_PTT:
+        SetState(STILL);
+        TuneToPeak();
+        break;
+    case KEY_MENU:
+        // Short press toggles manual/auto.
+        manualSetFlag = !manualSetFlag;
+        if (!manualSetFlag)
+            settings.rssiTriggerLevel = RSSI_MAX_VALUE;
+        redrawStatus = true;
+        break;
+    case KEY_EXIT:
+        if (menuState)
+        {
             menuState = 0;
             break;
-
-        default:
-
-
-            break;
+        }
+        DeInitSpectrum();
+        break;
+    default:
+        break;
     }
 }
 
- void RenderFreqInput() {
-    UI_PrintStringSmall(freqInputString, 2, 127, 0);
-//    show_uint32(tempFreq,3);
+static void OnKeyDownFreqInput(KEY_Code_t key)
+{
+    switch (key)
+    {
+    case KEY_0...KEY_9:
+    case KEY_STAR:
+    case KEY_EXIT:
+        if (freqInputIndex == 0 && key == KEY_EXIT)
+        {
+            SetState(previousState);
+            break;
+        }
+        UpdateFreqInput(key);
+        break;
+    case KEY_MENU:
+        if (tempFreq < F_MIN || tempFreq > F_MAX)
+        {
+            break;
+        }
+        SetState(previousState);
+        currentFreq = tempFreq;
+        if (currentState == SPECTRUM)
+        {
+            ResetBlacklist();
+            RelaunchScan();
+        }
+        else
+        {
+            SetF(currentFreq);
+        }
+        break;
+    default:
+        break;
+    }
 }
 
-static void UpdateStill() {
-    if (TX_ON)return;
-    Measure();
-    redrawScreen = true;
-    preventKeypress = false;
-
-    peak.rssi = scanInfo.rssi;
-    AutoTriggerLevel();
-
-    ToggleRX((IsPeakOverLevel() || monitorMode));
+static void OnKeyDownStill(KEY_Code_t key) {
+    switch (key)
+    {
+    case KEY_UP:
+    case KEY_DOWN:
+        if (menuState) {
+            SetRegMenuValue(menuState, GetDirection(key));
+            break;
+        }
+        UpdateCurrentFreqStill(GetDirection(key));
+        break;
+    case KEY_5:
+        FreqInput();
+        break;
+    case KEY_SIDE1:
+        monitorMode = !monitorMode;
+        break;
+    case KEY_MENU:
+        menuState = (menuState == ARRAY_SIZE(registerSpecs) - 1) ? 1 : menuState + 1;
+        redrawScreen = true;
+        break;
+    case KEY_EXIT:
+        if (!menuState)
+        {
+            SetState(SPECTRUM);
+            lockAGC = false;
+            monitorMode = false;
+            RelaunchScan();
+            break;
+        }
+        menuState = 0;
+        break;
+    default:
+        break;
+    }
 }
 
-static void RenderStatus() {
+void RenderFreqInput(void) { UI_PrintString(freqInputString, 2, 127, 0, 8); }
 
+static void RenderStatus()
+{
     memset(gStatusLine, 0, sizeof(gStatusLine));
     DrawStatus();
     ST7565_BlitStatusLine();
 }
 
-static void RenderSpectrum() {
+static void RenderSpectrum()
+{
+    uint16_t steps = GetStepsCount();
+    uint8_t arrowX = (steps > 1) ? (uint8_t)(128u * peak.i / (steps - 1)) : 0;
     DrawTicks();
-    DrawArrow(128u * peak.i / GetStepsCount());
-    DrawSpectrum();
-    DrawRssiTriggerLevel();
+    DrawArrow(arrowX);
+    DrawSpectrumBars();
     DrawF(peak.f);
     DrawNums();
+    DrawRssiTriggerLevel();
 }
 
-#ifdef ENABLE_DOPPLER
+static void RenderStill()
+{
+    DrawF(fMeasure);
 
-static void Draw_DOPPLER_Process(uint8_t DATA_LINE) {
-    int process = 0;
-    if (time_diff > 0)//还没来卫星 (the satellite has not arrived yet)
+    const uint8_t METER_PAD_LEFT = 3;
+
+    memset(&gFrameBuffer[2][METER_PAD_LEFT], 0b00010000, 121);
+
+    for (int i = 0; i < 121; i += 5)
     {
-        if (time_diff > 1000)//还早 (still a long way off)
+        gFrameBuffer[2][i + METER_PAD_LEFT] = 0b00110000;
+    }
+
+    for (int i = 0; i < 121; i += 10)
+    {
+        gFrameBuffer[2][i + METER_PAD_LEFT] = 0b01110000;
+    }
+
+    uint8_t x = Rssi2PX(rssiSmoothed, 0, 121);
+    for (int i = 0; i < x; ++i)
+    {
+        if (i % 5)
         {
-            strcpy(String, "Long");
-
-        } else//1000s以内 (within 1000 s)
-        {
-            sprintf(String, "-%4d sec", time_diff);
-            process = time_diff * 45 / 1000;
-        }
-    } else { //已经来了 (it has arrived)
-        if (time_diff1 >= 0)//正在过境 (pass in progress)
-        {
-            sprintf(String, "+%4d sec", satellite.sum_time + time_diff);
-            process = 45 - (satellite.sum_time + time_diff) * 45 / satellite.sum_time;
-        } else {
-
-            strcpy(String, "Passed");
-        }
-    }
-    GUI_DisplaySmallest(String, 85, DATA_LINE + 15, false, true);
-    memset(&gFrameBuffer[6][80], 0b01000000, 45);
-    gFrameBuffer[6][79] = 0b00111110;
-    gFrameBuffer[6][45 + 80] = 0b00111110;
-    for (int i = 0; i < 45; i++) {
-        if (i < process)
-            gFrameBuffer[6][i + 80] = 0b00111110;
-        else
-            gFrameBuffer[6][i + 80] = 0b00100010;
-    }
-    sprintf(String, "20%02d-%02d-%02d %02d:%02d:%02d", time[0], time[1], time[2], time[3], time[4], time[5]);
-    GUI_DisplaySmallest(String, 1, DATA_LINE + 23, false, true);
-}
-
-#endif
-
-static void RenderStill() {
-    DrawF(fMeasure);//绘制频率 (draw the frequency)
-    uint8_t METER_PAD_LEFT = 3;
-    uint8_t P_WIDTH = 120;
-    uint8_t S_LINE = 25;
-    uint8_t S_X = 4;
-    uint8_t DBM_X = 22;
-#ifdef ENABLE_DOPPLER
-    if (DOPPLER_MODE) {
-        P_WIDTH = 50;
-        METER_PAD_LEFT = 70;
-        S_LINE = 18;
-        S_X = 58;
-        DBM_X = 6;
-    }
-#endif
-    memset(&gFrameBuffer[2][METER_PAD_LEFT], 0b01000000, P_WIDTH);
-
-    for (int i = 0; i <= P_WIDTH; i += 5) { //小刻度 (minor ticks)
-        gFrameBuffer[2][i + METER_PAD_LEFT] = 0b01100000;
-
-    }
-    uint8_t x = Rssi2PX(scanInfo.rssi, 0, P_WIDTH);//信号强度 (signal strength)
-    for (int i = 0; i < x; i++) {
-        if (i % 5) {
-            gFrameBuffer[2][i + METER_PAD_LEFT] |= 0b00001110;
+            gFrameBuffer[2][i + METER_PAD_LEFT] |= 0b00000111;
         }
     }
 
-//S表参数绘制 (draw the S-meter parameters)
-    int dbm = Rssi2DBm(scanInfo.rssi);
+    int dbm = Rssi2DBm(rssiSmoothed);
     uint8_t s = DBm2S(dbm);
-    bool fill = true;
-#ifdef ENABLE_DOPPLER
-    if ((monitorMode || IsPeakOverLevel()) && DOPPLER_MODE) {
-        memset(gFrameBuffer[2] + DBM_X - 2, 0b11111110, 51);
-        fill = false;
-    }
-#endif
-    sprintf(String, "S%u", s);
-    GUI_DisplaySmallest(String, S_X, S_LINE, false, true);
-    sprintf(String, "%4d/%4ddBm", dbm, Rssi2DBm(settings.rssiTriggerLevel));
-    GUI_DisplaySmallest(String, DBM_X, S_LINE, false, fill);
+    sprintf(String, "S: %u", s);
+    GUI_DisplaySmallest(String, 4, 25, false, true);
+    sprintf(String, "%d dBm", dbm);
+    GUI_DisplaySmallest(String, 28, 25, false, true);
 
-    if (!monitorMode) {
-        uint8_t x = Rssi2PX(settings.rssiTriggerLevel, 0, P_WIDTH);
+    if (!monitorMode)
+    {
+        uint8_t x = Rssi2PX(settings.rssiTriggerLevel, 0, 121);
         gFrameBuffer[2][METER_PAD_LEFT + x] = 0b11111111;
     }
-    //增益参数 (gain parameters)
+
     const uint8_t PAD_LEFT = 4;
     const uint8_t CELL_WIDTH = 30;
     uint8_t offset = PAD_LEFT;
     uint8_t row = 4;
-    uint8_t DATA_LINE;
-    uint8_t SHOW_LINE=4;
-#ifdef ENABLE_DOPPLER
-    if (DOPPLER_MODE)SHOW_LINE = 3;
-#endif
-    for (int i = 0, idx = 1; idx <= 4; ++i, ++idx) {
-//        if (idx == 5) {
-//            row += 2;
-//            i = 0;
-//        }
+
+    for (int i = 0, idx = 1; idx <= 3; ++i, ++idx)
+    {
+        if (idx == 4)
+        {
+            row += 2;
+            i = 0;
+        }
         offset = PAD_LEFT + i * CELL_WIDTH;
-        if (menuState == idx) {
-            for (int j = 0; j < CELL_WIDTH; ++j) {
-                gFrameBuffer[SHOW_LINE][j + offset] = 0xFF;
-                gFrameBuffer[SHOW_LINE + 1][j + offset] = 0xFF;
+        if (menuState == idx)
+        {
+            for (int j = 0; j < CELL_WIDTH; ++j)
+            {
+                gFrameBuffer[row][j + offset] = 0xFF;
+                gFrameBuffer[row + 1][j + offset] = 0xFF;
             }
         }
-        DATA_LINE = row * 8 + 2;
-#ifdef ENABLE_DOPPLER
-        if (DOPPLER_MODE)DATA_LINE -= 8;
-#endif
         sprintf(String, "%s", registerSpecs[idx].name);
-        GUI_DisplaySmallest(String, offset + 2, DATA_LINE, false,
+        GUI_DisplaySmallest(String, offset + 2, row * 8 + 2, false,
                             menuState != idx);
-        sprintf(String, "%u", GetRegMenuValue(idx));
-        GUI_DisplaySmallest(String, offset + 2, DATA_LINE + 7, false,
-                            menuState != idx);
-    }
-#ifdef ENABLE_DOPPLER
 
-    if (DOPPLER_MODE) {
-        Draw_DOPPLER_Process(26);
-        bool flag = true;
-        if (!isTransmitting)
-            sprintf(String, "UPLink:%4d.%05d", satellite_data.UPLink / 100000, satellite_data.UPLink % 100000);
-        else {
-            memset(gFrameBuffer[5], 0x7f, 77);
-            flag = false;
-            sprintf(String, "DownLink:%4d.%05d", satellite_data.DownLink / 100000, satellite_data.DownLink % 100000);
+#ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+        sprintf(String, "%ddB", regOptions[idx].options[GetRegMenuValue(idx)]);
+
+        /*
+        if(idx == 1)
+        {
+            sprintf(String, "%ddB", LNAsOptions[GetRegMenuValue(idx)]);
         }
-        GUI_DisplaySmallest(String, 1, DATA_LINE + 15, false, flag);
-
-    }
+        else if(idx == 2)
+        {
+            sprintf(String, "%ddB", LNAOptions[GetRegMenuValue(idx)]);
+        }
+        else if(idx == 3)
+        {
+            sprintf(String, "%ddB", VGAOptions[GetRegMenuValue(idx)]);
+        }
+        else if(idx == 4)
+        {
+            sprintf(String, "%skHz", BPFOptions[(GetRegMenuValue(idx) / 0x2aaa)]);
+        }
+        */
+#else
+        sprintf(String, "%u", GetRegMenuValue(idx));
 #endif
-}
-
-static void Render() {
-    UI_DisplayClear();
-    switch (currentState) {
-        case SPECTRUM:
-            RenderSpectrum();
-            break;
-        case FREQ_INPUT:
-            RenderFreqInput();
-            break;
-        case STILL:
-            RenderStill();
-            break;
-
+        GUI_DisplaySmallest(String, offset + 2, (row + 1) * 8 + 1, false,
+                            menuState != idx);
     }
-    ST7565_BlitFullScreen();
 }
 
-static void HandleUserInput() {
+#define HELP_ROWS   7u
+#define HELP_PAGES  3u
+
+// Key reference, shown by holding MENU in the spectrum view. The 3x5 font
+// advances 4 px, so a row holds 32 characters and the screen holds 7 rows.
+static const char *const HelpPages[HELP_PAGES][HELP_ROWS] = {
+    {
+        "SPECTRUM KEYS       1/3  UP/DN",
+        "1 / 7   scan step",
+        "2 / 8   frequency move step",
+        "3 / 9   max dB, or sensitivity",
+        "4       bin count 16..128",
+        "5       type in a frequency",
+        "0 / 6   modulation / bandwidth",
+    },
+    {
+        "SPECTRUM KEYS       2/3  UP/DN",
+        "* / F   squelch level",
+        "UP/DOWN move centre frequency",
+        "SIDE1   blacklist this peak",
+        "SIDE2   backlight",
+        "MENU    auto / manual dB",
+        "M hold  this help",
+    },
+    {
+        "MONITOR KEYS        3/3  UP/DN",
+        "PTT     listen at the peak",
+        "UP/DOWN frequency, or menu value",
+        "SIDE1   hold the monitor open",
+        "MENU    gain menu LNA / PGA",
+        "EXIT    back, or leave the app",
+        "any key closes this help",
+    },
+};
+
+static bool    helpShown;
+static uint8_t helpPage;
+static bool    helpAwaitRelease;   // ignore the press that opened the page
+
+static void ShowHelp()
+{
+    helpShown = true;
+    helpPage = 0;
+    helpAwaitRelease = true;       // MENU is still down at this point
+    redrawScreen = true;
+}
+
+static void RenderHelp()
+{
+    for (uint8_t row = 0; row < HELP_ROWS; row++)
+    {
+        const char *line = HelpPages[helpPage][row];
+        if (line && line[0])
+            GUI_DisplaySmallest(line, 1, (uint8_t)(row * 8u), false, true);
+    }
+}
+
+static void Render()
+{
+    UI_DisplayClear();
+
+    if (helpShown)
+    {
+        RenderHelp();
+        return;
+    }
+
+    switch (currentState)
+    {
+    case SPECTRUM:
+        RenderSpectrum();
+        break;
+    case FREQ_INPUT:
+        RenderFreqInput();
+        break;
+    case STILL:
+        RenderStill();
+        break;
+    }
+
+    // Display blit is done incrementally (one page per tick) — see Tick().
+}
+
+static bool HandleUserInput()
+{
     kbd.prev = kbd.current;
     kbd.current = GetKey();
-    if (kbd.current == KEY_INVALID) {
-        kbd.counter = 0;
-#ifdef ENABLE_DOPPLER
-        if (DOPPLER_MODE && isTransmitting) {
-            ToggleTX(false);
-        }
-#endif
-//        return true;
-    }
 
-    if (kbd.current != KEY_INVALID && kbd.current == kbd.prev) {
+    if (kbd.current != KEY_INVALID && kbd.current == kbd.prev)
+    {
         if (kbd.counter < 16)
             kbd.counter++;
         else
             kbd.counter -= 3;
         SYSTEM_DelayMs(20);
-    } else {
+    }
+    else
+    {
         kbd.counter = 0;
     }
 
+    if (helpShown)
+    {
+        // The long press that opened the page is still held: wait for the
+        // release, or the very next repeat would close it again.
+        if (kbd.current == KEY_INVALID)
+            helpAwaitRelease = false;
+        else if (!helpAwaitRelease && kbd.counter == 3)
+        {
+            if (kbd.current == KEY_UP)
+                helpPage = (uint8_t)((helpPage + HELP_PAGES - 1u) % HELP_PAGES);
+            else if (kbd.current == KEY_DOWN)
+                helpPage = (uint8_t)((helpPage + 1u) % HELP_PAGES);
+            else
+                helpShown = false;
 
-    if (kbd.counter == 2 || kbd.counter == 16) {
-        switch (currentState) {
-            case SPECTRUM:
-                OnKeyDown(kbd.current);
-                break;
-            case FREQ_INPUT:
-                OnKeyDownFreqInput(kbd.current);
-                break;
-            case STILL:
-                OnKeyDownStill(kbd.current);
-                break;
+            redrawScreen = true;
+        }
 
+        return true;
+    }
+
+    // Spectrum MENU key handling:
+    // - short press => action on release
+    // - long press  => one-shot at counter==16
+    if (currentState == SPECTRUM)
+    {
+        if (kbd.current == KEY_INVALID && kbd.prev == KEY_MENU)
+        {
+            if (menuKeyPendingShort && !menuKeyLongHandled)
+                OnKeyDown(KEY_MENU);
+            menuKeyPendingShort = false;
+            menuKeyLongHandled = false;
+        }
+        else if (kbd.current != KEY_MENU && kbd.prev != KEY_MENU)
+        {
+            menuKeyPendingShort = false;
+            menuKeyLongHandled = false;
         }
     }
 
+    if (kbd.counter == 3 || kbd.counter == 16)
+    {
+        if (currentState == SPECTRUM && kbd.current == KEY_MENU)
+        {
+            if (kbd.counter == 3)
+            {
+                menuKeyPendingShort = true;
+                menuKeyLongHandled = false;
+            }
+            else if (kbd.counter == 16 && !menuKeyLongHandled)
+            {
+                menuKeyPendingShort = false;
+                menuKeyLongHandled = true;
+                ShowHelp();
+            }
+            return true;
+        }
+
+        if (currentState == FREQ_INPUT)
+            OnKeyDownFreqInput(kbd.current);
+
+        else if (!OnKeyDownCommon(kbd.current)) {
+            if (currentState == SPECTRUM)
+                OnKeyDown(kbd.current);
+            else if (currentState == STILL)
+                OnKeyDownStill(kbd.current);
+        }
+    }
+
+    return true;
 }
 
-static void Scan() {
-    if (rssiHistory[scanInfo.i] != RSSI_MAX_VALUE
-        #ifdef ENABLE_SCAN_RANGES
+static void Scan()
+{
+    uint8_t slot = GetHistorySlot(scanInfo.i);
+
+    if (rssiHistory[slot] != RSSI_MAX_VALUE
+#ifdef ENABLE_SCAN_RANGES
         && !IsBlacklisted(scanInfo.i)
 #endif
-            ) {
-        SetF(scanInfo.f);
+    )
+    {
+        SetFScan(scanInfo.f);
         Measure();
         UpdateScanInfo();
     }
 }
 
-static void NextScanStep() {
+static void NextScanStep()
+{
     ++peak.t;
-    ++scanInfo.i;
-    scanInfo.f += scanInfo.scanStep;
+    if (scanForward) {
+        ++scanInfo.i;
+        scanInfo.f += scanInfo.scanStep;
+    } else {
+        --scanInfo.i;
+        scanInfo.f -= scanInfo.scanStep;
+    }
 }
 
-static void UpdateScan() {
+#if SPECTRUM_INTERLACE_LARGE_SWEEPS
+static bool UseInterlacedSweep()
+{
+    return scanInfo.measurementsCount > ARRAY_SIZE(rssiHistory) &&
+           interlaceStride > 1;
+}
+
+static bool NextScanStepInterlaced()
+{
+    uint16_t next = scanInfo.i + interlaceStride;
+
+    if (next < scanInfo.measurementsCount)
+    {
+        scanInfo.i = next;
+        scanInfo.f += (uint32_t)interlaceStride * scanInfo.scanStep;
+        return false;
+    }
+
+    for (uint16_t phase = interlacePhase + 1; phase < interlaceStride; ++phase)
+    {
+        if (phase < scanInfo.measurementsCount)
+        {
+            interlacePhase = phase;
+            scanInfo.i = phase;
+            scanInfo.f = GetFStart() + (uint32_t)phase * scanInfo.scanStep;
+            return false;
+        }
+    }
+
+    interlacePhase = 0;
+    return true;
+}
+#endif
+
+static void FinalizeCompletedSweep()
+{
+    if (! (scanInfo.measurementsCount >> 7)) // if (scanInfo.measurementsCount < 128)
+        memset(&rssiHistory[scanInfo.measurementsCount], 0,
+               sizeof(rssiHistory) - scanInfo.measurementsCount * sizeof(rssiHistory[0]));
+
+    // Auto-adjust dbMax unless the user has overridden it manually.
+    if (manualDbMaxTimer > 0) {
+        if (--manualDbMaxTimer == 0)
+            redrawStatus = true;
+    } else if (!manualSetFlag) {
+        int newMax = Rssi2DBm(scanInfo.rssiMax) + 5;
+        int dbMin = settings.dbMin + 10;
+        if (newMax < dbMin)
+            newMax = dbMin;
+        if (newMax > 10)
+            newMax = 10;
+        settings.dbMax = newMax;
+    }
+
+    // Next full sweep starts from the opposite side to avoid directional bias.
+    scanStartFromLeft = !scanStartFromLeft;
+    newScanStart = true;
+}
+
+static void UpdateScan()
+{
     Scan();
 
-    if (scanInfo.i < scanInfo.measurementsCount) {
+#if SPECTRUM_INTERLACE_LARGE_SWEEPS
+    if (UseInterlacedSweep())
+    {
+        bool atEnd = (scanInfo.i + interlaceStride >= scanInfo.measurementsCount);
+
+        if (!atEnd)
+        {
+            ++peak.t;
+            (void)NextScanStepInterlaced();
+            return;
+        }
+
+        preventKeypress = false;
+
+        UpdatePeakInfo();
+        if (IsPeakOverOpenLevel())
+        {
+            ToggleRX(true);
+            TuneToPeak();
+            return;
+        }
+
+        ++peak.t;
+        if (!NextScanStepInterlaced())
+            return;
+
+        FinalizeCompletedSweep();
+        return;
+    }
+#endif
+
+    bool atEnd = scanForward ? (scanInfo.i >= scanInfo.measurementsCount - 1)
+                             : (scanInfo.i <= 1);
+
+    if (!atEnd)
+    {
         NextScanStep();
         return;
     }
 
-    if (scanInfo.measurementsCount < 128)
-        memset(&rssiHistory[scanInfo.measurementsCount], 0,
-               sizeof(rssiHistory) - scanInfo.measurementsCount * sizeof(rssiHistory[0]));
-
-    redrawScreen = true;
+    // End of half-sweep: unlock keypad; Render() fires on its own timer.
     preventKeypress = false;
 
     UpdatePeakInfo();
-    if (IsPeakOverLevel()) {
+    if (IsPeakOverOpenLevel())
+    {
         ToggleRX(true);
         TuneToPeak();
         return;
     }
 
-    newScanStart = true;
+    if (scanReturnPending)
+    {
+        // Finish the opposite half-sweep before finalizing this cycle.
+        scanReturnPending = false;
+        scanForward = !scanForward;
+        NextScanStep();
+        return;
+    }
+
+    // Full round trip done.
+    FinalizeCompletedSweep();
 }
 
-
-static void UpdateListening() {
+static void UpdateStill()
+{
+    Measure();
+    redrawScreen = true;
     preventKeypress = false;
-    if (currentState == STILL) {
-        listenT = 0;
+
+    peak.rssi = scanInfo.rssi;
+    // EMA α=0.25 for display only; seed on first sample
+    rssiSmoothed = rssiSmoothed ? (rssiSmoothed * 3 + scanInfo.rssi) >> 2
+                                : scanInfo.rssi;
+    AutoTriggerLevel();
+
+    if (IsPeakOverOpenLevel() || monitorMode) {
+        ToggleRX(true);
     }
-    if (listenT) {
+}
+
+static void UpdateListening()
+{
+    preventKeypress = false;
+
+    // listenT counts down with 1ms delay per tick — no SPI during this phase.
+    if (listenT)
+    {
         listenT--;
         SYSTEM_DelayMs(1);
         return;
     }
 
-    if (currentState == SPECTRUM) {
+    // --- Single SPI burst: all BK4819 accesses happen here, once per
+    // listenT expiry (every 320 ms).  SPI repeats at ~3 Hz — below the
+    // audible range.  Between bursts the bus is completely silent.
+
+#ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+    bool tailFound = checkIfTailFound();
+    if (tailFound)
+    {
+        ToggleRX(false);
+        ResetScanStats();
+        ResetPeak();
+        RequestAutoTriggerRecalibration();
+        newScanStart = true;
+        redrawStatus = true;
+        return;
+    }
+#endif
+
+    if (currentState == SPECTRUM)
+    {
         BK4819_WriteRegister(0x43, GetBWRegValueForScan());
         Measure();
         BK4819_WriteRegister(0x43, listenBWRegValues[settings.listenBw]);
-    } else {
+    }
+    else
+    {
+#ifndef ENABLE_FEAT_F4HWN_SPECTRUM
+        if (currentState == STILL)
+        {
+            ToggleRX(false);
+            ResetScanStats();
+            ResetPeak();
+            RequestAutoTriggerRecalibration();
+            newScanStart = true;
+            redrawStatus = true;
+            return;
+        }
+#endif
         Measure();
     }
 
     peak.rssi = scanInfo.rssi;
+    rssiSmoothed = rssiSmoothed ? (rssiSmoothed * 3 + scanInfo.rssi) >> 2
+                                : scanInfo.rssi;
     redrawScreen = true;
+    redrawStatus = true;
 
-    if (IsPeakOverLevel() || monitorMode) {
-        listenT = 1000;
+    bool abruptDrop = false;
+    if (!monitorMode && listenPrevRssi != RSSI_MAX_VALUE &&
+        listenPrevRssi > LISTEN_DROP_EXIT_RSSI)
+    {
+        // End TX usually appears as a sharp RSSI fall; leave RX quickly and
+        // resume sweep instead of waiting for the debounce path.
+        abruptDrop = (scanInfo.rssi + LISTEN_DROP_EXIT_RSSI) <= listenPrevRssi;
+    }
+    listenPrevRssi = scanInfo.rssi;
+
+    bool keepListening = monitorMode;
+    if (!keepListening)
+    {
+        if (abruptDrop)
+        {
+            listenLowCount = 0;
+            keepListening = false;
+        }
+        else if (IsListeningSignalPresent(scanInfo.rssi))
+        {
+            listenLowCount = 0;
+            keepListening = true;
+        }
+        else if (++listenLowCount < LISTEN_RELEASE_LOW_COUNT)
+        {
+            keepListening = true;
+        }
+        else
+        {
+            listenLowCount = 0;
+            keepListening = false;
+        }
+    }
+
+    if (keepListening)
+    {
+        listenT = 320;
         return;
     }
 
     ToggleRX(false);
     ResetScanStats();
+    ResetPeak();
+    RequestAutoTriggerRecalibration();
+    newScanStart = true;
+    redrawStatus = true;
 }
 
-static void Tick() {
+static void Tick()
+{
 #ifdef ENABLE_AM_FIX
-    if (gNextTimeslice) {
+    if (gNextTimeslice)
+    {
         gNextTimeslice = false;
-        if(settings.modulationType == MODULATION_AM && !lockAGC) {
-            AM_fix_10ms(vfo); //allow AM_Fix to apply its AGC action
+        if (settings.modulationType == MODULATION_AM && !lockAGC)
+        {
+            AM_fix_10ms(vfo);   // let AM_Fix apply its AGC action
         }
     }
 #endif
 
 #ifdef ENABLE_SCAN_RANGES
-    if (gNextTimeslice_500ms) {
+    if (gNextTimeslice_500ms)
+    {
         gNextTimeslice_500ms = false;
 
-        // if a lot of steps then it takes long time
-        // we don't want to wait for whole scan
-        // listening has it's own timer
-        if(GetStepsCount()>128 && !isListening) {
-            UpdatePeakInfo();
-            if (IsPeakOverLevel()) {
-                ToggleRX(true);
-                TuneToPeak();
-                return;
-            }
+        // For large scans (>128 steps), refresh display periodically but
+        // wait for the full sweep to complete before triggering listen mode.
+        // This avoids showing stale rssiHistory data from a previous sweep.
+        if (GetStepsCount() > 128 && !isListening)
+        {
             redrawScreen = true;
             preventKeypress = false;
         }
     }
 #endif
 
-    if (!preventKeypress) {
+    if (!preventKeypress)
+    {
         HandleUserInput();
     }
-    if (newScanStart) {
-        InitScan();
+    if (newScanStart)
+    {
+        InitScanPosition();
         newScanStart = false;
     }
-    if (isListening && currentState != FREQ_INPUT) {
+    if (isListening && currentState != FREQ_INPUT)
+    {
         UpdateListening();
-    } else {
-        if (currentState == SPECTRUM) {
+    }
+    else
+    {
+        if (currentState == SPECTRUM)
+        {
             UpdateScan();
-        } else if (currentState == STILL) {
+        }
+        else if (currentState == STILL)
+        {
             UpdateStill();
         }
-
-
     }
-
-
-    if (redrawStatus || ++statuslineUpdateTimer > 4096) {
+    if (redrawStatus || ++statuslineUpdateTimer > 4096)
+    {
         RenderStatus();
         redrawStatus = false;
         statuslineUpdateTimer = 0;
     }
-
-
-    if (redrawScreen) {
+    // Render at a fixed rate (RENDER_PERIOD_TICKS) independent of step count,
+    // so the CPU burst from Render() never falls below the ~9 Hz flutter-fusion
+    // threshold regardless of how many steps the scan uses.  redrawScreen can
+    // still force an immediate repaint (key presses, settings changes, etc.).
+    if (redrawScreen || ++renderTimer >= RENDER_PERIOD_TICKS)
+    {
         Render();
         redrawScreen = false;
+        renderTimer = 0;
     }
+
+    // Send one framebuffer page to the display per tick (~47 Hz full refresh).
+    ST7565_BlitLine(renderPage);
+    if (++renderPage >= FRAME_LINES)
+        renderPage = 0;
 }
 
+void APP_RunSpectrum()
+{
+    settings.backlightState = gEeprom.BACKLIGHT_TIME == 0 ? false : true;
 
- void APP_RunSpectrum() {
-    currentState = SPECTRUM;
-    previousState=SPECTRUM;
     // TX here coz it always? set to active VFO
     vfo = gEeprom.TX_VFO;
+    // No persistence by design: every run starts from the defaults above, so
+    // the analyser always opens at a known 64 bins x 25 kHz.
+    ApplyDefaultSettings();
     // set the current frequency in the middle of the display
 #ifdef ENABLE_SCAN_RANGES
-    if(gScanRangeStart) {
-        currentFreq = initialFreq = gScanRangeStart;
-        for(uint8_t i = 0; i < ARRAY_SIZE(scanStepValues); i++) {
-            if(scanStepValues[i] >= gTxVfo->StepFrequency) {
-                settings.scanStepIndex = i;
-                break;
-            }
-        }
-        settings.stepsCount = STEPS_128;
-    }
-    else
-#endif
+    if (gScanRangeStart)
     {
+        currentFreq = initialFreq = gScanRangeStart;
+        // Keep the default step/count in scan-range mode rather than deriving
+        // them from the VFO, so entry is predictable here too.
+    }
+    else {
+#endif
         currentFreq = initialFreq = gTxVfo->pRX->Frequency -
                                     ((GetStepsCount() / 2) * GetScanStep());
     }
+
     BackupRegisters();
 
     isListening = true; // to turn off RX later
-    redrawStatus = true;
-    redrawScreen = true;
     newScanStart = true;
-
+    scanStartFromLeft = true;
 
     ToggleRX(true), ToggleRX(false); // hack to prevent noise when squelch off
     RADIO_SetModulation(settings.modulationType = gTxVfo->Modulation);
 
+#ifdef ENABLE_FEAT_F4HWN_SPECTRUM
+    BK4819_SetFilterBandwidth(settings.listenBw, false);
+#else
     BK4819_SetFilterBandwidth(settings.listenBw = BK4819_FILTER_BW_WIDE, false);
+#endif
 
-    RelaunchScan();
+    RearmRuntimeState();
 
-    memset(rssiHistory, 0, sizeof(rssiHistory));
     isInitialized = true;
-#ifdef ENABLE_DOPPLER
-    statuslineUpdateTimer = 4097;
 
-    if (DOPPLER_MODE) {
-        settings.listenBw = 0;
-        settings.modulationType = MODULATION_FM;
-        SetState(STILL);
-        TuneToPeak();
-
-
-        settings.dbMin = -130;
-    }
-#endif
-    while (isInitialized) {
-//#ifdef ENABLE_DOPPLER
-//
-//        if (DOPPLER_MODE) {
-//            satellite_data.DownLink=43850000;
-//            SetF(satellite_data.DownLink);
-//            currentFreq = satellite_data.DownLink;
-//        }
-//#endif
-#ifdef ENABLE_DOPPLER
-        if (DOPPLER_MODE&&!isTransmitting&&currentFreq!=satellite_data.DownLink) {
-            SetF(satellite_data.DownLink);
-            currentFreq = satellite_data.DownLink;
-        }
-
-#endif
+    while (isInitialized)
+    {
         Tick();
-
     }
 
+    BACKLIGHT_TurnOn();
 }
-
-#ifdef ENABLE_DOPPLER
-
-void RTCHandler(void) {
-
-
-    RTC_Get();
-    int32_t NOW_UNIX_TIME = UNIX_TIME(time);
-    time_diff = satellite.START_TIME_UNIX - NOW_UNIX_TIME; //卫星开始时间-现在时间 (satellite start time - current time)
-    time_diff1 = satellite.sum_time + time_diff;//结束-开始+开始-现在 (end - start + start - now)
-
-    READ_DATA(time_diff, time_diff1);
-
-
-    RTC_IF |= (1 << 5);//清除中断标志位 (clear the interrupt flag)
-
-}
-
-#endif
