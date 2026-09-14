@@ -72,8 +72,22 @@ ENABLE_DOPPLER               =0
 
 PORT    ?= /dev/ttyUSB1
 
+ENABLE_SPECTRUM_LOGGER        ?= 0
+
 #############################################################
 PACKED_FILE_SUFFIX = QRCKE
+
+# The logger is a single-purpose build: no SI4732, no ordinary spectrum, and it
+# takes over the key that used to open the spectrum. It also owns EEPROM the
+# Chinese features would use, so those must stay off (they already are).
+ifeq ($(ENABLE_SPECTRUM_LOGGER),1)
+	ENABLE_4732 = 0
+	ENABLE_4732SSB = 0
+	ENABLE_SPECTRUM = 0
+	ENABLE_DOPPLER = 0
+	PACKED_FILE_SUFFIX := $(PACKED_FILE_SUFFIX)LOG
+    $(info SPECTRUM LOGGER)
+endif
 ifeq ($(ENABLE_DOPPLER),1)
 	ENABLE_SPECTRUM=1
 endif
@@ -202,6 +216,9 @@ OBJS += app/menu.o
 ifeq ($(ENABLE_SPECTRUM), 1)
 OBJS += app/spectrum.o
 endif
+ifeq ($(ENABLE_SPECTRUM_LOGGER), 1)
+OBJS += app/speclog.o
+endif
 OBJS += app/scanner.o
 ifeq ($(ENABLE_UART),1)
 	OBJS += app/uart.o
@@ -281,6 +298,9 @@ AUTHOR_STRING ?= QRCK
 ifeq ($(ENABLE_TX_BLOCKED),1)
 	override AUTHOR_STRING := $(AUTHOR_STRING)-NOTX
 endif
+ifeq ($(ENABLE_SPECTRUM_LOGGER),1)
+	override AUTHOR_STRING := $(AUTHOR_STRING)-LOG
+endif
 # the user might not have/want git installed
 # can set own version string here (max 7 chars)
 ifneq (, $(shell $(WHERE) git))
@@ -336,6 +356,9 @@ CFLAGS += -DAUTHOR_STRING=\"$(AUTHOR_STRING)\" -DVERSION_STRING=\"$(VERSION_STRI
 
 ifeq ($(ENABLE_SPECTRUM),1)
 CFLAGS += -DENABLE_SPECTRUM
+endif
+ifeq ($(ENABLE_SPECTRUM_LOGGER),1)
+CFLAGS += -DENABLE_SPECTRUM_LOGGER
 endif
 ifeq ($(ENABLE_BOOTLOADER),1)
     CFLAGS  += -DENABLE_BOOTLOADER

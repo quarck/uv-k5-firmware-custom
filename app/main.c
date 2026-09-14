@@ -36,6 +36,10 @@
 #include "app/spectrum.h"
 #endif
 
+#ifdef ENABLE_SPECTRUM_LOGGER
+#include "app/speclog.h"
+#endif
+
 #include "audio.h"
 #include "board.h"
 #include "driver/bk4819.h"
@@ -220,6 +224,10 @@ gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
                 gVfoConfigureMode = VFO_CONFIGURE_RELOAD;
 #elif defined(ENABLE_SPECTRUM)
                 APP_RunSpectrum();
+                gRequestDisplayScreen = DISPLAY_MAIN;
+#elif defined(ENABLE_SPECTRUM_LOGGER)
+                // The logger build has no spectrum, so it takes the same key.
+                APP_RunSpectrumLogger();
                 gRequestDisplayScreen = DISPLAY_MAIN;
 #endif
             } else {
