@@ -85,7 +85,9 @@
 #include "driver/keyboard.h"
 #include "driver/st7565.h"
 #include "driver/system.h"
+#include "driver/crc.h"
 #include "driver/systick.h"
+#include "driver/uart.h"
 #include "external/printf/printf.h"
 #include "helper/battery.h"
 #include "misc.h"
@@ -117,6 +119,11 @@ typedef enum
 
 static LoggerState state;
 static bool        running;
+
+// F+7 runs the same machinery with the window shortened and the frame sent out
+// of the UART instead of stored. Nothing touches EEPROM in this mode.
+static bool        streaming;
+static uint16_t    streamSeq;
 
 // Sweep
 static uint32_t fStart;          // bin 0, 10 Hz units
@@ -150,7 +157,10 @@ static uint8_t clockIndex;
 // app runs the main loop's battery handling does not, so watch it here and
 // close the session while there is still enough left to write the header.
 #define LOG_BATTERY_STOP_PERCENT 5
-static uint8_t batteryPercent = 100;
+#define LOG_BATTERY_LOW_PERCENT  20
+static uint8_t  batteryPercent = 100;
+static uint16_t batteryVoltage;          // centivolts, so 762 is 7.62 V
+static bool     statusDirty = true;
 
 // Keys
 static KEY_Code_t lastKey = KEY_INVALID;
@@ -159,6 +169,7 @@ static uint8_t    keySettled;
 // Display
 static char     String[32];
 static uint8_t  backlightSeconds;
+static uint8_t  batterySeconds;
 static bool     redraw = true;
 static uint8_t  renderPage;
 
@@ -260,9 +271,8 @@ static void ResetWindow(void)
     framePending = false;
 }
 
-static void EmitFrame(void)
+static void BuildFrame(uint8_t *frame)
 {
-    uint8_t frame[LOG_FRAME_BYTES];
 
     // 2 * (dBm - LOG_DBM_BASE) = lo + 2*corr + 2*(RSSI_DBM_OFFSET - DBM_BASE),
     // all integer: lo is in half-dB, so working at twice the scale keeps the
@@ -295,6 +305,52 @@ static void EmitFrame(void)
             level = LOG_LEVELS - 1;
 
         frame[i] = (uint8_t)level;
+    }
+}
+
+// One packet per window, framed and checksummed so the host can resync on a
+// cable that was plugged in halfway through. Layout is in app/speclog.h.
+static void SendFrame(const uint8_t *frame)
+{
+    uint8_t pkt[LOG_STREAM_BYTES];
+    const int16_t dbmBase = LOG_DBM_BASE;
+
+    pkt[0] = 'K';
+    pkt[1] = '5';
+    pkt[2] = LOG_STREAM_VERSION;
+    pkt[3] = LOG_BINS;
+    memcpy(&pkt[4], &streamSeq, 2);
+    memcpy(&pkt[6], &elapsed, 4);
+    memcpy(&pkt[10], &fStart, 4);
+    memcpy(&pkt[14], &fStep, 2);
+    memcpy(&pkt[16], &sweeps, 2);      // before ResetWindow clears it
+    memcpy(&pkt[18], &dbmBase, 2);
+    pkt[20] = LOG_DBM_STEP;
+    pkt[21] = (uint8_t)dBmCorrTable[gRxVfo->Band];
+    memcpy(&pkt[LOG_STREAM_HEAD], frame, LOG_FRAME_BYTES);
+
+    const uint16_t crc = CRC_Calculate1(pkt, LOG_STREAM_HEAD + LOG_FRAME_BYTES);
+    memcpy(&pkt[LOG_STREAM_HEAD + LOG_FRAME_BYTES], &crc, 2);
+
+    // Blocking and polled, but 152 bytes at 38400 baud is ~40 ms once every
+    // LOG_STREAM_SECONDS, which the sweep never notices.
+    UART_Send(pkt, sizeof(pkt));
+    streamSeq++;
+    framesWritten++;
+}
+
+static void EmitFrame(void)
+{
+    uint8_t frame[LOG_FRAME_BYTES];
+
+    BuildFrame(frame);
+
+    if (streaming)
+    {
+        SendFrame(frame);
+        ResetWindow();
+        redraw = true;
+        return;
     }
 
     if (frameInBlock == 0)
@@ -494,21 +550,58 @@ static void RenderRunning(void)
 
     RenderBars();
 
-    DrawClockString(String, startClock + elapsed);
+    // Streaming has no operator clock - the host timestamps - so show how long
+    // this run has been going instead of a time of day.
+    DrawClockString(String, streaming ? elapsed : startClock + elapsed);
     LogText(String, 2, 43);
 
-    sprintf(String, "%u/%u", (unsigned)framesWritten, (unsigned)LOG_FRAMES_TOTAL);
+    if (streaming)
+        sprintf(String, "TX %u", (unsigned)framesWritten);
+    else
+        sprintf(String, "%u/%u", (unsigned)framesWritten, (unsigned)LOG_FRAMES_TOTAL);
     LogText(String, 40, 43);
 
-    sprintf(String, "BLK%u %u%%", (unsigned)block, (unsigned)batteryPercent);
+    if (streaming)
+        sprintf(String, "UART %u%%", (unsigned)batteryPercent);
+    else
+        sprintf(String, "BLK%u %u%%", (unsigned)block, (unsigned)batteryPercent);
     LogText(String, 92, 43);
 
     if (state == LOG_FULL)
-        sprintf(String, "FULL - STOPPED, EXIT TO END");
+        sprintf(String, "STOPPED, EXIT TO END");
     else
-        sprintf(String, "REC %us  %u SWEEPS", (unsigned)(LOG_AVG_SECONDS - avgSeconds),
+        sprintf(String, "%s %us  %u SWEEPS", streaming ? "TX IN" : "REC",
+                (unsigned)((streaming ? LOG_STREAM_SECONDS : LOG_AVG_SECONDS) - avgSeconds),
                 (unsigned)sweeps);
     LogText(String, 2, 50);
+}
+
+// The status line is this app's only always-visible real estate, and an
+// unattended run is exactly where a dying pack needs to be obvious - so it
+// carries the battery on every screen, as a voltage, a percentage and the same
+// bar glyph the rest of the firmware draws at the right-hand end.
+static void RenderStatus(void)
+{
+    memset(gStatusLine, 0, sizeof(gStatusLine));
+
+    sprintf(String, "%s %u.%02uV %u%%%s", streaming ? "STREAM" : "LOG",
+            (unsigned)(batteryVoltage / 100), (unsigned)(batteryVoltage % 100),
+            (unsigned)batteryPercent,
+            (batteryPercent < LOG_BATTERY_LOW_PERCENT) ? " LOW" : "");
+    GUI_DisplaySmallest(String, 2, 1, true, true);
+
+    gStatusLine[116] = 0b00011100;
+    gStatusLine[117] = 0b00111110;
+    for (uint8_t i = 118; i <= 126; i++)
+        gStatusLine[i] = 0b00100010;
+
+    // Fill from the positive end, one segment per ~11%.
+    for (uint8_t i = 127; i >= 118; i--)
+        if (127u - i <= ((unsigned)batteryPercent + 5u) * 9u / 100u)
+            gStatusLine[i] = 0b00111110;
+
+    ST7565_BlitStatusLine();
+    statusDirty = false;
 }
 
 static void Render(void)
@@ -590,8 +683,9 @@ static void HandleKey(KEY_Code_t key)
     if (key == KEY_EXIT)
     {
         // Close the session so the reader can tell a finished log from one cut
-        // short by a flat battery.
-        WriteHeader(true);
+        // short by a flat battery. Nothing to close when streaming.
+        if (!streaming)
+            WriteHeader(true);
         running = false;
     }
 }
@@ -601,16 +695,22 @@ static void CheckBattery(void)
     BOARD_ADC_GetBatteryInfo(&gBatteryVoltages[gBatteryCheckCounter++ % 4],
                              &gBatteryCurrent);
 
-    const uint16_t voltage = (gBatteryVoltages[0] + gBatteryVoltages[1] +
-                              gBatteryVoltages[2] + gBatteryVoltages[3]) /
-                             4 * 760 / gBatteryCalibration[3];
-    batteryPercent = BATTERY_VoltsToPercent(voltage);
+    batteryVoltage = (gBatteryVoltages[0] + gBatteryVoltages[1] +
+                      gBatteryVoltages[2] + gBatteryVoltages[3]) /
+                     4 * 760 / gBatteryCalibration[3];
+    batteryPercent = BATTERY_VoltsToPercent(batteryVoltage);
+    statusDirty = true;
 
-    if (state == LOG_RUNNING && batteryPercent < LOG_BATTERY_STOP_PERCENT)
+    // elapsed > 0 keeps the very first sample from closing the app the instant
+    // it opens on a low pack - the operator gets a screen saying LOW and one
+    // second to read it, rather than a key that appears to do nothing.
+    if (state == LOG_RUNNING && elapsed > 0 &&
+        batteryPercent < LOG_BATTERY_STOP_PERCENT)
     {
-        // Stop logging rather than let the pack die mid-write, and hand back to
-        // the main app, whose own low-battery handling then takes over.
-        WriteHeader(true);
+        // Stop rather than let the pack die mid-write, and hand back to the
+        // main app, whose own low-battery handling then takes over.
+        if (!streaming)
+            WriteHeader(true);
         state = LOG_FULL;
         running = false;
     }
@@ -631,7 +731,7 @@ static void Tick(void)
             if (state == LOG_RUNNING)
             {
                 elapsed++;
-                if (++avgSeconds >= LOG_AVG_SECONDS)
+                if (++avgSeconds >= (streaming ? LOG_STREAM_SECONDS : LOG_AVG_SECONDS))
                     framePending = true;   // taken at the next sweep boundary
             }
 
@@ -639,8 +739,11 @@ static void Tick(void)
             if (backlightSeconds < 255 && ++backlightSeconds == 20)
                 BACKLIGHT_TurnOff();
 
-            if ((elapsed % 10u) == 0)
+            if (++batterySeconds >= 10)
+            {
+                batterySeconds = 0;
                 CheckBattery();
+            }
 
             redraw = true;
         }
@@ -683,6 +786,9 @@ static void Tick(void)
     if (state == LOG_RUNNING)
         SweepStep();
 
+    if (statusDirty)
+        RenderStatus();
+
     if (redraw)
     {
         Render();
@@ -692,7 +798,7 @@ static void Tick(void)
 
 // ----------------------------------------------------------------- entry ---
 
-void APP_RunSpectrumLogger(void)
+static void RunApp(bool stream)
 {
     for (uint32_t i = 0; i < ARRAY_SIZE(registers_to_save); i++)
         registers_stack[i] = BK4819_ReadRegister(registers_to_save[i]);
@@ -707,7 +813,17 @@ void APP_RunSpectrumLogger(void)
     lastKey = KEY_INVALID;   // statics: a previous session left its exit key here
     keySettled = 0;
 
-    state = LOG_SET_CLOCK;
+    streaming = stream;
+    streamSeq = 0;
+    framesWritten = 0;
+    elapsed = 0;
+    halfSeconds = 0;
+
+    // The recorder asks for the time of day first, because the log has to carry
+    // one; the stream is timestamped by the host, so it just starts.
+    state = stream ? LOG_RUNNING : LOG_SET_CLOCK;
+    if (stream)
+        StartScan();
     clockIndex = 0;
     running = true;
     redraw = true;
@@ -715,8 +831,9 @@ void APP_RunSpectrumLogger(void)
     fStep = scanStepValues[stepChoices[stepChoice]];
     BACKLIGHT_TurnOn();
 
-    memset(gStatusLine, 0, sizeof(gStatusLine));
-    ST7565_BlitStatusLine();
+    batterySeconds = 0;
+    CheckBattery();          // before the first draw, so it never shows 0.00 V
+    RenderStatus();
 
     while (running)
         Tick();
@@ -750,4 +867,14 @@ void APP_RunSpectrumLogger(void)
 
     gVfoConfigureMode = VFO_CONFIGURE;
     BACKLIGHT_TurnOn();
+}
+
+void APP_RunSpectrumLogger(void)
+{
+    RunApp(false);
+}
+
+void APP_RunSpectrumStream(void)
+{
+    RunApp(true);
 }

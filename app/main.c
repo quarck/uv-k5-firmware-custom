@@ -244,7 +244,12 @@ gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
             break;
 
         case KEY_7:
-#ifdef ENABLE_VOX
+#ifdef ENABLE_SPECTRUM_LOGGER
+            // The logger build has no use for scan lists; F+7 streams the
+            // sweep out of the UART instead.
+            APP_RunSpectrumStream();
+            gRequestDisplayScreen = DISPLAY_MAIN;
+#elif defined(ENABLE_VOX)
             ACTION_Vox();
 #else
             toggle_chan_scanlist();

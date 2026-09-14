@@ -45,6 +45,33 @@
 #define LOG_LEVELS           256                   // 2^LOG_BIN_BITS
 #define LOG_RSSI_DBM_OFFSET  (-160)                // dBm = rssi/2 + this + band correction
 
+// Live stream (F+7). Same sweep and the same averaging as the recorder, but the
+// window is shorter and each frame goes straight out of the UART instead of
+// into EEPROM, so nothing is stored and the session is as long as you like.
+// k5stream.py is the reader.
+//
+// One packet per window, little-endian, 152 bytes:
+//
+//   0   2  magic "K5"
+//   2   1  stream format version (1)
+//   3   1  bins (128)
+//   4   2  sequence, wraps at 65536 - a gap means frames were lost
+//   6   4  seconds since the app started
+//  10   4  frequency of bin 0, 10 Hz units
+//  14   2  bin spacing, 10 Hz units
+//  16   2  sweeps averaged into this frame
+//  18   2  dBm of a zero byte (int16, -185)
+//  20   1  dB per step (1)
+//  21   1  band correction already applied (int8, informational)
+//  22 128  one byte per bin, byte = dBm - the value at offset 18
+// 150   2  CRC-16/XMODEM over bytes 0..149, the same one app/uart.c uses
+//
+#define LOG_STREAM_SECONDS   10u
+#define LOG_STREAM_VERSION   1u
+#define LOG_STREAM_HEAD      22u
+#define LOG_STREAM_BYTES     (LOG_STREAM_HEAD + LOG_FRAME_BYTES + 2u)   // 152
+
 void APP_RunSpectrumLogger(void);
+void APP_RunSpectrumStream(void);
 
 #endif
