@@ -2,13 +2,17 @@
 """
 k5stream.py -- record the spectrum logger's live UART stream.
 
-F+7 on the logger build sweeps continuously and pushes one averaged frame out
-of the programming cable every 10 seconds. This reads that stream, checks each
-frame, and appends it to a CSV in exactly the shape k5logdump.py writes - so
-k5logview.py renders a stream recording and a stored log the same way.
+F+7 opens the spectrum analyser with its live stream on: once a second it pushes
+out the strongest reading each bin saw in that second. This reads that stream,
+checks each frame, and appends it to a CSV in exactly the shape k5logdump.py
+writes - so k5logview.py renders a stream recording and a stored log the same
+way.
 
-Frames are timestamped by this host, not the radio: the radio has no clock, and
-in stream mode it never asks for one.
+Frames are timestamped by this host, not the radio, which has no clock.
+
+The analyser is interactive, so its scan plan can change mid-capture. A CSV has
+one fixed set of columns, so when the plan changes this starts a new numbered
+file rather than silently mixing two bands into one.
 
     python k5stream.py -p /dev/ttyUSB0 stream.csv
     python k5stream.py -p /dev/ttyUSB0 stream.csv --quiet
@@ -26,9 +30,9 @@ from datetime import datetime
 
 MAGIC = b"K5"
 HEAD = 22
-BINS = 128
-PACKET = HEAD + BINS + 2          # app/speclog.h: LOG_STREAM_BYTES
-VERSION = 1
+BINS = 128                        # the payload is always this long...
+PACKET = HEAD + BINS + 2          # app/spectrum.h: SPECTRUM_STREAM_BYTES
+VERSION = 2                       # 2 = per-bin maximum over one second
 
 
 def crc16(data):
@@ -42,14 +46,21 @@ def crc16(data):
 
 
 class Frame:
-    __slots__ = ("seq", "elapsed", "f_start", "f_step", "sweeps", "dbm_base",
-                 "dbm_step", "corr", "levels")
+    __slots__ = ("bins", "seq", "elapsed", "f_start", "f_step", "sweeps",
+                 "dbm_base", "dbm_step", "corr", "levels")
 
     def __init__(self, pkt):
+        # ...but only the first `bins` bytes of it mean anything: the analyser's
+        # bin count is selectable, 16 to 128, and the packet stays a fixed size.
+        self.bins = pkt[3]
         (self.seq, self.elapsed, self.f_start, self.f_step, self.sweeps,
          self.dbm_base, self.dbm_step, self.corr) = struct.unpack_from(
             "<HIIHHhBb", pkt, 4)
-        self.levels = pkt[HEAD:HEAD + BINS]
+        self.levels = pkt[HEAD:HEAD + self.bins]
+
+    @property
+    def plan(self):
+        return (self.f_start, self.f_step, self.bins)
 
     @property
     def dbm(self):
@@ -57,14 +68,15 @@ class Frame:
 
     def freqs(self):
         """Bin centres in MHz. The radio counts in 10 Hz units."""
-        return [(self.f_start + i * self.f_step) * 10 / 1e6 for i in range(BINS)]
+        return [(self.f_start + i * self.f_step) * 10 / 1e6
+                for i in range(self.bins)]
 
 
 def parse(pkt):
     """Validate one candidate packet; None if it is not a good frame."""
     if len(pkt) != PACKET or pkt[:2] != MAGIC:
         return None
-    if pkt[2] != VERSION or pkt[3] != BINS:
+    if pkt[2] != VERSION or not 0 < pkt[3] <= BINS:
         return None
     if crc16(pkt[:HEAD + BINS]) != struct.unpack_from("<H", pkt, HEAD + BINS)[0]:
         return None
@@ -139,12 +151,19 @@ def main():
         print(f"Listening on {args.port} at {args.baud} baud. Ctrl-C to stop.")
 
     raw = open(args.raw, "ab") if args.raw else None
-    out = open(args.csv, "a+")
-    out.seek(0)
-    header_written = bool(out.read(1))
-    out.seek(0, 2)
 
-    n = bad = lost = 0
+    def open_csv(path):
+        f = open(path, "a+")
+        f.seek(0)
+        started_empty = not f.read(1)
+        f.seek(0, 2)
+        return f, started_empty
+
+    out, empty = open_csv(args.csv)
+    name = args.csv
+    part = 1
+
+    n = bad = lost = quiet_frames = 0
     prev_seq = None
     plan = None
     started = time.time()
@@ -154,15 +173,25 @@ def main():
                 bad += 1
                 continue
 
+            if plan is not None and frame.plan != plan:
+                # Someone turned the dial. A CSV has one set of columns, so
+                # roll to a new file rather than mix two bands in one table.
+                part += 1
+                base = args.csv.rsplit(".", 1)
+                name = (f"{base[0]}.{part}.{base[1]}" if len(base) == 2
+                        else f"{args.csv}.{part}")
+                print(f"  ! scan plan changed; continuing in {name}",
+                      file=sys.stderr)
+                out.close()
+                out, empty = open_csv(name)
+                plan = None
+
             if plan is None:
-                plan = (frame.f_start, frame.f_step)
-                if not header_written:
-                    out.write("time," + ",".join(f"{f:.5f}" for f in frame.freqs()) + "\n")
-                    header_written = True
-            elif (frame.f_start, frame.f_step) != plan:
-                print("  ! the radio changed its scan window mid-stream; "
-                      "start a new CSV", file=sys.stderr)
-                break
+                plan = frame.plan
+                if empty:
+                    out.write("time," + ",".join(f"{f:.5f}" for f in frame.freqs())
+                              + "\n")
+                    empty = False
 
             if prev_seq is not None:
                 gap = (frame.seq - prev_seq - 1) & 0xFFFF
@@ -180,11 +209,16 @@ def main():
                 raw.flush()
             n += 1
 
+            if frame.sweeps == 0:
+                # The analyser stops sweeping while it listens to a signal, so
+                # a second can pass with only a partial sweep or none at all.
+                quiet_frames += 1
+
             if not args.quiet:
                 peak = max(frame.dbm)
                 at = frame.freqs()[frame.dbm.index(peak)]
                 print(f"  {now:%H:%M:%S}  seq {frame.seq:5d}  "
-                      f"{frame.sweeps:3d} sweeps  peak {peak:4d} dBm @ {at:.4f} MHz"
+                      f"{frame.sweeps:2d} swp  peak {peak:4d} dBm @ {at:.4f} MHz"
                       f"  [{n} frames, {bad} bad, {lost} lost]")
     except KeyboardInterrupt:
         print()
@@ -195,9 +229,11 @@ def main():
         src.close()
 
     mins = (time.time() - started) / 60
-    print(f"  {n} frames written to {args.csv} over {mins:.1f} min"
-          f"  ({bad} rejected, {lost} lost)")
-    print(f"  render it with:  python k5logview.py {args.csv}")
+    print(f"  {n} frames written to {name} over {mins:.1f} min"
+          f"  ({bad} rejected, {lost} lost"
+          + (f", {quiet_frames} with no complete sweep" if quiet_frames else "")
+          + ")")
+    print(f"  render it with:  python k5logview.py {name}")
     return 0
 
 

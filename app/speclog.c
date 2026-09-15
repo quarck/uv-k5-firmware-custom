@@ -85,9 +85,7 @@
 #include "driver/keyboard.h"
 #include "driver/st7565.h"
 #include "driver/system.h"
-#include "driver/crc.h"
 #include "driver/systick.h"
-#include "driver/uart.h"
 #include "external/printf/printf.h"
 #include "helper/battery.h"
 #include "misc.h"
@@ -119,11 +117,6 @@ typedef enum
 
 static LoggerState state;
 static bool        running;
-
-// F+7 runs the same machinery with the window shortened and the frame sent out
-// of the UART instead of stored. Nothing touches EEPROM in this mode.
-static bool        streaming;
-static uint16_t    streamSeq;
 
 // Sweep
 static uint32_t fStart;          // bin 0, 10 Hz units
@@ -308,50 +301,11 @@ static void BuildFrame(uint8_t *frame)
     }
 }
 
-// One packet per window, framed and checksummed so the host can resync on a
-// cable that was plugged in halfway through. Layout is in app/speclog.h.
-static void SendFrame(const uint8_t *frame)
-{
-    uint8_t pkt[LOG_STREAM_BYTES];
-    const int16_t dbmBase = LOG_DBM_BASE;
-
-    pkt[0] = 'K';
-    pkt[1] = '5';
-    pkt[2] = LOG_STREAM_VERSION;
-    pkt[3] = LOG_BINS;
-    memcpy(&pkt[4], &streamSeq, 2);
-    memcpy(&pkt[6], &elapsed, 4);
-    memcpy(&pkt[10], &fStart, 4);
-    memcpy(&pkt[14], &fStep, 2);
-    memcpy(&pkt[16], &sweeps, 2);      // before ResetWindow clears it
-    memcpy(&pkt[18], &dbmBase, 2);
-    pkt[20] = LOG_DBM_STEP;
-    pkt[21] = (uint8_t)dBmCorrTable[gRxVfo->Band];
-    memcpy(&pkt[LOG_STREAM_HEAD], frame, LOG_FRAME_BYTES);
-
-    const uint16_t crc = CRC_Calculate1(pkt, LOG_STREAM_HEAD + LOG_FRAME_BYTES);
-    memcpy(&pkt[LOG_STREAM_HEAD + LOG_FRAME_BYTES], &crc, 2);
-
-    // Blocking and polled, but 152 bytes at 38400 baud is ~40 ms once every
-    // LOG_STREAM_SECONDS, which the sweep never notices.
-    UART_Send(pkt, sizeof(pkt));
-    streamSeq++;
-    framesWritten++;
-}
-
 static void EmitFrame(void)
 {
     uint8_t frame[LOG_FRAME_BYTES];
 
     BuildFrame(frame);
-
-    if (streaming)
-    {
-        SendFrame(frame);
-        ResetWindow();
-        redraw = true;
-        return;
-    }
 
     if (frameInBlock == 0)
         WriteBlockStamp();
@@ -550,29 +504,20 @@ static void RenderRunning(void)
 
     RenderBars();
 
-    // Streaming has no operator clock - the host timestamps - so show how long
-    // this run has been going instead of a time of day.
-    DrawClockString(String, streaming ? elapsed : startClock + elapsed);
+    DrawClockString(String, startClock + elapsed);
     LogText(String, 2, 43);
 
-    if (streaming)
-        sprintf(String, "TX %u", (unsigned)framesWritten);
-    else
-        sprintf(String, "%u/%u", (unsigned)framesWritten, (unsigned)LOG_FRAMES_TOTAL);
+    sprintf(String, "%u/%u", (unsigned)framesWritten, (unsigned)LOG_FRAMES_TOTAL);
     LogText(String, 40, 43);
 
-    if (streaming)
-        sprintf(String, "UART %u%%", (unsigned)batteryPercent);
-    else
-        sprintf(String, "BLK%u %u%%", (unsigned)block, (unsigned)batteryPercent);
+    sprintf(String, "BLK%u %u%%", (unsigned)block, (unsigned)batteryPercent);
     LogText(String, 92, 43);
 
     if (state == LOG_FULL)
-        sprintf(String, "STOPPED, EXIT TO END");
+        sprintf(String, "FULL - STOPPED, EXIT TO END");
     else
-        sprintf(String, "%s %us  %u SWEEPS", streaming ? "TX IN" : "REC",
-                (unsigned)((streaming ? LOG_STREAM_SECONDS : LOG_AVG_SECONDS) - avgSeconds),
-                (unsigned)sweeps);
+        sprintf(String, "REC %us  %u SWEEPS",
+                (unsigned)(LOG_AVG_SECONDS - avgSeconds), (unsigned)sweeps);
     LogText(String, 2, 50);
 }
 
@@ -584,7 +529,7 @@ static void RenderStatus(void)
 {
     memset(gStatusLine, 0, sizeof(gStatusLine));
 
-    sprintf(String, "%s %u.%02uV %u%%%s", streaming ? "STREAM" : "LOG",
+    sprintf(String, "LOG %u.%02uV %u%%%s",
             (unsigned)(batteryVoltage / 100), (unsigned)(batteryVoltage % 100),
             (unsigned)batteryPercent,
             (batteryPercent < LOG_BATTERY_LOW_PERCENT) ? " LOW" : "");
@@ -683,9 +628,8 @@ static void HandleKey(KEY_Code_t key)
     if (key == KEY_EXIT)
     {
         // Close the session so the reader can tell a finished log from one cut
-        // short by a flat battery. Nothing to close when streaming.
-        if (!streaming)
-            WriteHeader(true);
+        // short by a flat battery.
+        WriteHeader(true);
         running = false;
     }
 }
@@ -709,8 +653,7 @@ static void CheckBattery(void)
     {
         // Stop rather than let the pack die mid-write, and hand back to the
         // main app, whose own low-battery handling then takes over.
-        if (!streaming)
-            WriteHeader(true);
+        WriteHeader(true);
         state = LOG_FULL;
         running = false;
     }
@@ -731,7 +674,7 @@ static void Tick(void)
             if (state == LOG_RUNNING)
             {
                 elapsed++;
-                if (++avgSeconds >= (streaming ? LOG_STREAM_SECONDS : LOG_AVG_SECONDS))
+                if (++avgSeconds >= LOG_AVG_SECONDS)
                     framePending = true;   // taken at the next sweep boundary
             }
 
@@ -798,7 +741,7 @@ static void Tick(void)
 
 // ----------------------------------------------------------------- entry ---
 
-static void RunApp(bool stream)
+void APP_RunSpectrumLogger(void)
 {
     for (uint32_t i = 0; i < ARRAY_SIZE(registers_to_save); i++)
         registers_stack[i] = BK4819_ReadRegister(registers_to_save[i]);
@@ -813,17 +756,11 @@ static void RunApp(bool stream)
     lastKey = KEY_INVALID;   // statics: a previous session left its exit key here
     keySettled = 0;
 
-    streaming = stream;
-    streamSeq = 0;
     framesWritten = 0;
     elapsed = 0;
     halfSeconds = 0;
 
-    // The recorder asks for the time of day first, because the log has to carry
-    // one; the stream is timestamped by the host, so it just starts.
-    state = stream ? LOG_RUNNING : LOG_SET_CLOCK;
-    if (stream)
-        StartScan();
+    state = LOG_SET_CLOCK;   // the time of day first: the log has to carry one
     clockIndex = 0;
     running = true;
     redraw = true;
@@ -869,12 +806,3 @@ static void RunApp(bool stream)
     BACKLIGHT_TurnOn();
 }
 
-void APP_RunSpectrumLogger(void)
-{
-    RunApp(false);
-}
-
-void APP_RunSpectrumStream(void)
-{
-    RunApp(true);
-}

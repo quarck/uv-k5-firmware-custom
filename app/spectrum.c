@@ -33,6 +33,8 @@
 #endif
 
 #include "driver/backlight.h"
+#include "driver/crc.h"
+#include "driver/uart.h"
 #include "frequencies.h"
 #include "ui/helper.h"
 #include "ui/main.h"
@@ -126,6 +128,16 @@ static void HoldReset(void)
     memset(holdRow, HOLD_NONE, sizeof(holdRow));
     holdTicks = 0;
 }
+
+// Live UART stream (F+7). Per bin, the strongest reading of the current second
+// - a maximum, so the whole path stays integer. streamMax is in the radio's own
+// half-dB RSSI units and is cleared every time a packet goes out.
+static bool     streamMode;
+static uint16_t streamMax[128];
+static uint16_t streamSeq;
+static uint16_t streamSweeps;
+static uint32_t streamElapsed;
+static uint8_t  streamTicks;
 
 // Cached REG_30 value for scan steps: avoids re-reading it on every SetFScan()
 // call (saves 1 SPI read per step = fewer SPI bus events = less SPI-induced audio interference).
@@ -448,6 +460,13 @@ static void SetFScan(uint32_t f)
 
 static bool IsPeakOverOpenLevel()
 {
+    // Streaming must not stop to listen: opening the audio parks the sweep on
+    // one frequency, and the second that follows reports no sweeps and a band
+    // of floor readings. Manual monitoring still works - monitorMode is tested
+    // separately by the caller.
+    if (streamMode)
+        return false;
+
     uint16_t openLevel = settings.rssiTriggerLevel;
     if (openLevel <= (uint16_t)(RSSI_MAX_VALUE - LISTEN_OPEN_HYST_RSSI))
         openLevel += LISTEN_OPEN_HYST_RSSI;
@@ -867,6 +886,15 @@ static void Measure()
 {
     uint16_t rssi = scanInfo.rssi = GetRssi();
     SetRssiHistory(scanInfo.i, rssi);
+
+    if (streamMode)
+    {
+        // Same slot mapping the display uses, so a streamed bin and a drawn
+        // bin are always the same piece of spectrum.
+        const uint8_t slot = GetHistorySlot(scanInfo.i);
+        if (rssi > streamMax[slot])
+            streamMax[slot] = rssi;
+    }
 }
 
 static void RequestAutoTriggerRecalibration()
@@ -1913,72 +1941,9 @@ static void RenderStill()
     }
 }
 
-#define HELP_ROWS   7u
-#define HELP_PAGES  3u
-
-// Key reference, shown by holding MENU in the spectrum view. The 3x5 font
-// advances 4 px, so a row holds 32 characters and the screen holds 7 rows.
-static const char *const HelpPages[HELP_PAGES][HELP_ROWS] = {
-    {
-        "SPECTRUM KEYS       1/3  UP/DN",
-        "1 / 7   scan step",
-        "2 / 8   frequency move step",
-        "3 / 9   max dB, or sensitivity",
-        "4       bin count 16..128",
-        "5       type in a frequency",
-        "0 / 6   modulation / bandwidth",
-    },
-    {
-        "SPECTRUM KEYS       2/3  UP/DN",
-        "* / F   squelch level",
-        "UP/DOWN move centre frequency",
-        "SIDE1   blacklist this peak",
-        "SIDE2   backlight",
-        "MENU    auto / manual dB",
-        "M hold  this help",
-    },
-    {
-        "MONITOR KEYS        3/3  UP/DN",
-        "PTT     listen at the peak",
-        "UP/DOWN frequency, or menu value",
-        "SIDE1   hold the monitor open",
-        "MENU    gain menu LNA / PGA",
-        "EXIT    back, or leave the app",
-        "any key closes this help",
-    },
-};
-
-static bool    helpShown;
-static uint8_t helpPage;
-static bool    helpAwaitRelease;   // ignore the press that opened the page
-
-static void ShowHelp()
-{
-    helpShown = true;
-    helpPage = 0;
-    helpAwaitRelease = true;       // MENU is still down at this point
-    redrawScreen = true;
-}
-
-static void RenderHelp()
-{
-    for (uint8_t row = 0; row < HELP_ROWS; row++)
-    {
-        const char *line = HelpPages[helpPage][row];
-        if (line && line[0])
-            GUI_DisplaySmallest(line, 1, (uint8_t)(row * 8u), false, true);
-    }
-}
-
 static void Render()
 {
     UI_DisplayClear();
-
-    if (helpShown)
-    {
-        RenderHelp();
-        return;
-    }
 
     switch (currentState)
     {
@@ -2014,27 +1979,6 @@ static bool HandleUserInput()
         kbd.counter = 0;
     }
 
-    if (helpShown)
-    {
-        // The long press that opened the page is still held: wait for the
-        // release, or the very next repeat would close it again.
-        if (kbd.current == KEY_INVALID)
-            helpAwaitRelease = false;
-        else if (!helpAwaitRelease && kbd.counter == 3)
-        {
-            if (kbd.current == KEY_UP)
-                helpPage = (uint8_t)((helpPage + HELP_PAGES - 1u) % HELP_PAGES);
-            else if (kbd.current == KEY_DOWN)
-                helpPage = (uint8_t)((helpPage + 1u) % HELP_PAGES);
-            else
-                helpShown = false;
-
-            redrawScreen = true;
-        }
-
-        return true;
-    }
-
     // Spectrum MENU key handling:
     // - short press => action on release
     // - long press  => one-shot at counter==16
@@ -2065,9 +2009,12 @@ static bool HandleUserInput()
             }
             else if (kbd.counter == 16 && !menuKeyLongHandled)
             {
+                // A long MENU press used to open a key-reference page. That
+                // belongs in the V3 firmware, which has the ROM for it; here
+                // it only has to swallow the press so the release does not
+                // then act as a short one.
                 menuKeyPendingShort = false;
                 menuKeyLongHandled = true;
-                ShowHelp();
             }
             return true;
         }
@@ -2148,6 +2095,53 @@ static bool NextScanStepInterlaced()
 }
 #endif
 
+// One packet per second. Everything here is integer: the payload is the
+// strongest RSSI each bin saw, mapped straight onto dBm + 185.
+static void SendStreamFrame(void)
+{
+    uint8_t pkt[SPECTRUM_STREAM_BYTES];
+    const uint8_t bars = GetBarCount();
+    const int16_t dbmBase = SPECTRUM_STREAM_DBM_BASE;
+    const int32_t bias = 2 * (int32_t)dBmCorrTable[gRxVfo->Band] +
+                         2 * (SPECTRUM_STREAM_RSSI_OFF - SPECTRUM_STREAM_DBM_BASE);
+    const uint32_t fStart = GetFStart();
+    const uint16_t fStep = GetScanStep();
+
+    // Only the unused tail needs clearing; every other byte is written below.
+    memset(&pkt[SPECTRUM_STREAM_HEAD + bars], 0, SPECTRUM_STREAM_BINS - bars);
+    pkt[0] = 'K';
+    pkt[1] = '5';
+    pkt[2] = SPECTRUM_STREAM_VERSION;
+    pkt[3] = bars;
+    memcpy(&pkt[4], &streamSeq, 2);
+    memcpy(&pkt[6], &streamElapsed, 4);
+    memcpy(&pkt[10], &fStart, 4);
+    memcpy(&pkt[14], &fStep, 2);
+    memcpy(&pkt[16], &streamSweeps, 2);
+    memcpy(&pkt[18], &dbmBase, 2);
+    pkt[20] = 1;                                     // 1 dB per step
+    pkt[21] = (uint8_t)dBmCorrTable[gRxVfo->Band];
+
+    // bias is 2*corr + 50 and dBmCorrTable runs -25..-1, so it is never
+    // negative and the sum cannot underflow - only the top needs clamping.
+    for (uint8_t i = 0; i < bars; i++)
+    {
+        const uint32_t v = ((uint32_t)streamMax[i] + (uint32_t)bias + 1u) >> 1;
+        pkt[SPECTRUM_STREAM_HEAD + i] = (v > 255u) ? 255u : (uint8_t)v;
+        streamMax[i] = 0;               // clear as we go, no second pass
+    }
+
+    const uint16_t crc = CRC_Calculate1(pkt, SPECTRUM_STREAM_HEAD + SPECTRUM_STREAM_BINS);
+    memcpy(&pkt[SPECTRUM_STREAM_HEAD + SPECTRUM_STREAM_BINS], &crc, 2);
+
+    // 152 bytes a second is 4% of 38400 baud, and the send is polled, so it
+    // costs the sweep about 40 ms once a second.
+    UART_Send(pkt, sizeof(pkt));
+
+    streamSeq++;
+    streamSweeps = 0;
+}
+
 static void FinalizeCompletedSweep()
 {
     if (! (scanInfo.measurementsCount >> 7)) // if (scanInfo.measurementsCount < 128)
@@ -2167,6 +2161,9 @@ static void FinalizeCompletedSweep()
             newMax = 10;
         settings.dbMax = newMax;
     }
+
+    if (streamMode)
+        streamSweeps++;
 
     // Next full sweep starts from the opposite side to avoid directional bias.
     scanStartFromLeft = !scanStartFromLeft;
@@ -2382,6 +2379,13 @@ static void Tick()
     {
         gNextTimeslice_500ms = false;
 
+        if (streamMode && ++streamTicks >= 2)
+        {
+            streamTicks = 0;
+            streamElapsed++;
+            SendStreamFrame();
+        }
+
         // Wall clock, not sweeps: the window stays 5-10 s whatever the bin
         // count and scan speed do.
         if (manualSetFlag && ++holdTicks >= HOLD_BUCKET_500MS)
@@ -2450,8 +2454,15 @@ static void Tick()
         renderPage = 0;
 }
 
-void APP_RunSpectrum()
+static void RunSpectrum(bool stream)
 {
+    streamMode = stream;
+    streamSeq = 0;
+    streamSweeps = 0;
+    streamElapsed = 0;
+    streamTicks = 0;
+    memset(streamMax, 0, sizeof(streamMax));
+
     settings.backlightState = gEeprom.BACKLIGHT_TIME == 0 ? false : true;
 
     // TX here coz it always? set to active VFO
@@ -2459,6 +2470,16 @@ void APP_RunSpectrum()
     // No persistence by design: every run starts from the defaults above, so
     // the analyser always opens at a known 64 bins x 25 kHz.
     ApplyDefaultSettings();
+
+    if (stream)
+    {
+        // The stream is for watching a band rather than tuning around it, and
+        // the packet carries 128 bins either way - so start at the finest
+        // resolution instead of throwing half of it away.
+        settings.stepsCount = STEPS_128;
+        settings.frequencyChangeStep = GetBW() >> 1;
+    }
+
     // set the current frequency in the middle of the display
 #ifdef ENABLE_SCAN_RANGES
     if (gScanRangeStart)
@@ -2498,4 +2519,15 @@ void APP_RunSpectrum()
     }
 
     BACKLIGHT_TurnOn();
+    streamMode = false;
+}
+
+void APP_RunSpectrum(void)
+{
+    RunSpectrum(false);
+}
+
+void APP_RunSpectrumStream(void)
+{
+    RunSpectrum(true);
 }
