@@ -81,14 +81,14 @@ const char *const bwOptions[] = {"25", "12.5", "6.25"};
 const uint8_t modulationTypeTuneSteps[] = {100, 50, 10};
 const uint8_t modTypeReg47Values[] = {1, 7, 5};
 
-SpectrumSettings settings = {.stepsCount = STEPS_64,
-                             .scanStepIndex = S_STEP_25_0kHz,
+SpectrumSettings settings = {.stepsCount = STEPS_128,
+                             .scanStepIndex = S_STEP_12_5kHz,
                              .frequencyChangeStep = 80000,
                              .scanDelay = 3200,
                              .rssiTriggerLevel = 150,
                              .backlightState = true,
-                             .bw = BK4819_FILTER_BW_WIDE,
-                             .listenBw = BK4819_FILTER_BW_WIDE,
+                             .bw = BK4819_FILTER_BW_NARROW,
+                             .listenBw = BK4819_FILTER_BW_NARROW,
                              .modulationType = false,
                              .dbMin = -130,
                              .dbMax = -50};
@@ -932,9 +932,9 @@ static void ApplyDefaultSettings()
     menuState = 0;
     lockAGC = false;
 
-    settings.scanStepIndex = S_STEP_25_0kHz;
-    settings.stepsCount = STEPS_64;
-    settings.listenBw = BK4819_FILTER_BW_WIDE;
+    settings.scanStepIndex = S_STEP_12_5kHz;
+    settings.stepsCount = STEPS_128;
+    settings.listenBw = BK4819_FILTER_BW_NARROW;   // 12.5 kHz
     settings.modulationType = gTxVfo->Modulation;
     settings.rssiTriggerLevel = RSSI_MAX_VALUE;
     autoNoiseFloor = RSSI_MAX_VALUE;
@@ -2468,17 +2468,9 @@ static void RunSpectrum(bool stream)
     // TX here coz it always? set to active VFO
     vfo = gEeprom.TX_VFO;
     // No persistence by design: every run starts from the defaults above, so
-    // the analyser always opens at a known 64 bins x 25 kHz.
+    // the analyser always opens at a known 128 bins x 12.5 kHz - a 1.6 MHz
+    // window, and the full 128 bins the stream packet carries.
     ApplyDefaultSettings();
-
-    if (stream)
-    {
-        // The stream is for watching a band rather than tuning around it, and
-        // the packet carries 128 bins either way - so start at the finest
-        // resolution instead of throwing half of it away.
-        settings.stepsCount = STEPS_128;
-        settings.frequencyChangeStep = GetBW() >> 1;
-    }
 
     // set the current frequency in the middle of the display
 #ifdef ENABLE_SCAN_RANGES
