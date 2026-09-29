@@ -103,6 +103,12 @@ static void processFKeyFunction(const KEY_Code_t Key, const bool beep) {
 #ifdef ENABLE_4732
             SI4732_Main();
 #endif
+#ifdef ENABLE_SPECTRUM_LOGGER
+            // Both branches above are compiled out in this build, so F+0 was
+            // doing nothing. The EEPROM logger takes it.
+            APP_RunSpectrumLogger();
+            gRequestDisplayScreen = DISPLAY_MAIN;
+#endif
             break;
 
         case KEY_1:

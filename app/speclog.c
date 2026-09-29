@@ -27,7 +27,7 @@
  *
  *   Header, 128 B at LOG_HEADER_ADDR
  *     0x00  4  magic "K5SL"
- *     0x04  1  format version (4)
+ *     0x04  1  format version (5)
  *     0x05  1  bins per frame (128)
  *     0x06  1  bits per bin (4)
  *     0x07  1  flags: bit 0 = session was closed cleanly
@@ -44,12 +44,12 @@
  *     0x20  4  frames written      <-- the only two fields rewritten in flight,
  *     0x24  4  seconds logged      <-- one aligned 8-byte write per 16 KiB block
  *     0x28  2  level 0 in dBm, int16 (-130; it does not fit in a byte)
- *     0x2A  1  dB per level (1)
+ *     0x2A  1  dB per level (8)
  *     0x2B  1  reserved (the level count is 2^bits, so it is not stored: 256
  *              would not fit in a byte)
  *     0x2C  ...  zero
  *
- *   Block, 16 KiB: a 128-byte timestamp record, then 127 frames of 128 bytes:
+ *   Block, 16 KiB: a 128-byte timestamp record, then 254 frames of 64 bytes:
  *     0x00  4  magic "K5LB"
  *     0x04  2  block index
  *     0x06  2  reserved
@@ -58,13 +58,13 @@
  *     0x10  4  frames written before this block
  *     0x14  ...  zero
  *
- * A frame is one byte per bin: an absolute dBm, byte = dBm + 185, 1 dB steps,
- * with the band correction already folded in (it stays in the header only to
- * say what was used). 4-bit levels on a 5 dB ladder fitted twice as many frames
- * and were tried first, but a UHF sweep put 74% of its samples on the bottom
- * rail, which makes the noise floor unmeasurable and every weak signal
- * indistinguishable from silence. A byte per bin costs half the session -
- * 1778 frames, about 15 hours - and clips at neither end.
+ * A frame packs two bins per byte, four bits each: bin 2n in the low nibble of
+ * byte n, bin 2n+1 in the high nibble. A level is an absolute dBm on an 8 dB
+ * ladder from -132, rounded, saturating at both ends, with the band correction
+ * already folded in (it stays in the header only to say what was used). 8 dB
+ * throws away detail on purpose: it buys twice the session, 3810 frames, about
+ * 31 hours. Where the base comes from is in app/speclog.h - it is measured, not
+ * guessed.
  *
  * Wear: every frame slot is written once per session and the header's counter
  * pair once per 16 KiB - roughly once an hour at the default 30 s average.
@@ -110,6 +110,7 @@ static uint8_t stepChoice = 2;   // 25 kHz, so 128 bins span 3.2 MHz
 
 typedef enum
 {
+    LOG_START_MENU,  // what is already stored, and what to do about it
     LOG_SET_CLOCK,   // entering the time of day, nothing is being recorded yet
     LOG_RUNNING,
     LOG_FULL,
@@ -141,6 +142,15 @@ static uint32_t sessionTag;
 static uint32_t framesWritten;
 static uint8_t  block;
 static uint8_t  frameInBlock;
+
+// What the store already holds, read once on entry. A new session overwrites
+// from block 0, so the operator needs to see what is about to be lost.
+static bool     haveStored;
+static bool     storedClosed;
+static uint32_t storedClock;
+static uint32_t storedFrames;
+static uint32_t storedSeconds;
+static bool     wipeArmed;      // 7 twice, so one fumble cannot erase a night
 
 // Time entry
 static uint8_t clockDigits[6];
@@ -197,13 +207,42 @@ static void LogWrite(uint32_t addr, const void *data, uint16_t size)
     }
 }
 
+static void ReadStored(void)
+{
+    uint8_t h[48];
+
+    EEPROM_ReadBuffer(LOG_HEADER_ADDR, h, sizeof(h));
+    haveStored = (memcmp(h, "K5SL", 4) == 0);
+    storedClosed = haveStored && (h[0x07] & 1u);
+    memcpy(&storedClock, &h[0x18], 4);
+    memcpy(&storedFrames, &h[0x20], 4);
+    memcpy(&storedSeconds, &h[0x24], 4);
+}
+
+// Zero the header and every block stamp. That is 76 page writes rather than the
+// whole 240 KiB: without a header the store reads as empty, and without its
+// stamp a block cannot be walked, so the frames become unreachable.
+static void WipeStore(void)
+{
+    const uint8_t zero[8] = {0};
+
+    for (uint16_t i = 0; i < LOG_STAMP; i += 8)
+        EEPROM_WriteBuffer(LOG_HEADER_ADDR + i, zero, 8);
+
+    for (uint8_t b = 0; b < LOG_BLOCKS_TOTAL; b++)
+        for (uint8_t i = 0; i < 32; i += 8)
+            EEPROM_WriteBuffer(BlockAddr(b) + i, zero, 8);
+
+    haveStored = false;
+}
+
 static void WriteHeader(bool closed)
 {
     uint8_t h[LOG_STAMP];
 
     memset(h, 0, sizeof(h));
     memcpy(h, "K5SL", 4);
-    h[0x04] = 4;
+    h[0x04] = 5;
     h[0x05] = LOG_BINS;
     h[0x06] = LOG_BIN_BITS;
     h[0x07] = closed ? 1 : 0;
@@ -297,7 +336,10 @@ static void BuildFrame(uint8_t *frame)
         else if (level > LOG_LEVELS - 1)
             level = LOG_LEVELS - 1;
 
-        frame[i] = (uint8_t)level;
+        if (i & 1u)
+            frame[i >> 1] |= (uint8_t)(level << 4);
+        else
+            frame[i >> 1] = (uint8_t)level;
     }
 }
 
@@ -423,6 +465,43 @@ static void DrawClockString(char *out, uint32_t seconds)
     seconds %= 86400u;
     sprintf(out, "%02u:%02u:%02u", (unsigned)(seconds / 3600u),
             (unsigned)((seconds / 60u) % 60u), (unsigned)(seconds % 60u));
+}
+
+static void RenderStartMenu(void)
+{
+    UI_DisplayClear();
+
+    sprintf(String, "SPECTRUM LOGGER");
+    LogText(String, 2, 2);
+
+    if (haveStored)
+    {
+        sprintf(String, "HELD %u FRAMES  %uH%02u",
+                (unsigned)storedFrames, (unsigned)(storedSeconds / 3600u),
+                (unsigned)((storedSeconds / 60u) % 60u));
+        LogText(String, 2, 12);
+
+        DrawClockString(String, storedClock);
+        LogText(String, 2, 19);
+        sprintf(String, "%s", storedClosed ? "CLOSED" : "CUT SHORT");
+        LogText(String, 40, 19);
+    }
+    else
+    {
+        sprintf(String, "STORE EMPTY");
+        LogText(String, 2, 12);
+    }
+
+    sprintf(String, "MENU  RECORD %uH%02u",
+            (unsigned)(LOG_FRAMES_TOTAL * LOG_AVG_SECONDS / 3600u),
+            (unsigned)((LOG_FRAMES_TOTAL * LOG_AVG_SECONDS / 60u) % 60u));
+    LogText(String, 2, 33);
+
+    sprintf(String, wipeArmed ? "7     AGAIN TO WIPE" : "7     WIPE THE STORE");
+    LogText(String, 2, 40);
+
+    sprintf(String, "EXIT  QUIT");
+    LogText(String, 2, 47);
 }
 
 static void RenderClockEntry(void)
@@ -551,7 +630,9 @@ static void RenderStatus(void)
 
 static void Render(void)
 {
-    if (state == LOG_SET_CLOCK)
+    if (state == LOG_START_MENU)
+        RenderStartMenu();
+    else if (state == LOG_SET_CLOCK)
         RenderClockEntry();
     else
         RenderRunning();
@@ -582,6 +663,29 @@ static void HandleKey(KEY_Code_t key)
     BACKLIGHT_TurnOn();
     backlightSeconds = 0;
     redraw = true;
+
+    if (state == LOG_START_MENU)
+    {
+        switch (key)
+        {
+        case KEY_MENU:
+            state = LOG_SET_CLOCK;
+            clockIndex = 0;
+            break;
+        case KEY_7:
+            if (wipeArmed)
+                WipeStore();
+            wipeArmed = !wipeArmed;
+            break;
+        case KEY_EXIT:
+            running = false;
+            break;
+        default:
+            wipeArmed = false;   // anything else disarms
+            break;
+        }
+        return;
+    }
 
     if (state == LOG_SET_CLOCK)
     {
@@ -760,7 +864,10 @@ void APP_RunSpectrumLogger(void)
     elapsed = 0;
     halfSeconds = 0;
 
-    state = LOG_SET_CLOCK;   // the time of day first: the log has to carry one
+    // What is already there first, then the time of day, then recording.
+    ReadStored();
+    wipeArmed = false;
+    state = LOG_START_MENU;
     clockIndex = 0;
     running = true;
     redraw = true;

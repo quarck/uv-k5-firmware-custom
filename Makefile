@@ -72,7 +72,7 @@ ENABLE_DOPPLER               =0
 
 PORT    ?= /dev/ttyUSB1
 
-ENABLE_SPECTRUM_LOGGER        ?= 0
+ENABLE_SPECTRUM_LOGGER        ?= 1
 
 #############################################################
 PACKED_FILE_SUFFIX = QRCKE
@@ -80,11 +80,10 @@ PACKED_FILE_SUFFIX = QRCKE
 # The logger is a single-purpose build: no SI4732, no ordinary spectrum, and it
 # takes over the key that used to open the spectrum. It also owns EEPROM the
 # Chinese features would use, so those must stay off (they already are).
+# The logger is now an extra app in the ordinary firmware rather than a build of
+# its own: with SI4732 gone there is nothing it needs switched off. It records
+# above 0x2000, clear of everything the radio itself uses.
 ifeq ($(ENABLE_SPECTRUM_LOGGER),1)
-	ENABLE_4732 = 0
-	ENABLE_4732SSB = 0
-	ENABLE_SPECTRUM = 0
-	ENABLE_DOPPLER = 0
 	PACKED_FILE_SUFFIX := $(PACKED_FILE_SUFFIX)LOG
     $(info SPECTRUM LOGGER)
 endif
@@ -298,8 +297,10 @@ AUTHOR_STRING ?= QRCK
 ifeq ($(ENABLE_TX_BLOCKED),1)
 	override AUTHOR_STRING := $(AUTHOR_STRING)-NOTX
 endif
+# A bare L, not -LOG: fw-pack.py caps this string at 10 characters and
+# QRCK-NOTX-LOG is 13, so a receive-only logger build would not pack.
 ifeq ($(ENABLE_SPECTRUM_LOGGER),1)
-	override AUTHOR_STRING := $(AUTHOR_STRING)-LOG
+	override AUTHOR_STRING := $(AUTHOR_STRING)L
 endif
 # the user might not have/want git installed
 # can set own version string here (max 7 chars)
