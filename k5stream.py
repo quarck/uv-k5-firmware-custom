@@ -146,7 +146,10 @@ def main():
             import serial
         except ImportError:
             sys.exit("pyserial is required:  pip install pyserial")
-        src = serial.Serial(args.port, args.baud, timeout=1)
+        try:
+            src = serial.Serial(args.port, args.baud, timeout=1)
+        except Exception as exc:                      # OSError, SerialException
+            sys.exit(f"cannot open {args.port}: {exc}")
         read = lambda n: src.read(max(1, src.in_waiting or 1))
         print(f"Listening on {args.port} at {args.baud} baud. Ctrl-C to stop.")
 

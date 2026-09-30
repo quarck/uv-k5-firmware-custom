@@ -69,7 +69,10 @@ def frame(payload: bytes) -> bytes:
 
 class Radio:
     def __init__(self, port, baud=38400, timeout=2.0, verbose=False):
-        self.ser = serial.Serial(port, baud, timeout=timeout)
+        try:
+            self.ser = serial.Serial(port, baud, timeout=timeout)
+        except Exception as exc:                      # OSError, SerialException
+            sys.exit(f"cannot open {port}: {exc}")
         self.timestamp = random.getrandbits(32)
         self.verbose = verbose
 

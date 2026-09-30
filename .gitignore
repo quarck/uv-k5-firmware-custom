@@ -7,3 +7,6 @@ firmware
 QRCK*.bin
 K5TOOL*
 __pycache__
+
+# viewlog.sh dumps and their reports
+logs/
