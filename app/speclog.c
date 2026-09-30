@@ -27,7 +27,7 @@
  *
  *   Header, 128 B at LOG_HEADER_ADDR
  *     0x00  4  magic "K5SL"
- *     0x04  1  format version (5)
+ *     0x04  1  format version (6)
  *     0x05  1  bins per frame (128)
  *     0x06  1  bits per bin (4)
  *     0x07  1  flags: bit 0 = session was closed cleanly
@@ -44,12 +44,12 @@
  *     0x20  4  frames written      <-- the only two fields rewritten in flight,
  *     0x24  4  seconds logged      <-- one aligned 8-byte write per 16 KiB block
  *     0x28  2  level 0 in dBm, int16 (-130; it does not fit in a byte)
- *     0x2A  1  dB per level (8)
+ *     0x2A  1  dB per level (1)
  *     0x2B  1  reserved (the level count is 2^bits, so it is not stored: 256
  *              would not fit in a byte)
  *     0x2C  ...  zero
  *
- *   Block, 16 KiB: a 128-byte timestamp record, then 254 frames of 64 bytes:
+ *   Block, 16 KiB: a 128-byte timestamp record, then 127 frames of 128 bytes:
  *     0x00  4  magic "K5LB"
  *     0x04  2  block index
  *     0x06  2  reserved
@@ -58,13 +58,13 @@
  *     0x10  4  frames written before this block
  *     0x14  ...  zero
  *
- * A frame packs two bins per byte, four bits each: bin 2n in the low nibble of
- * byte n, bin 2n+1 in the high nibble. A level is an absolute dBm on an 8 dB
- * ladder from -132, rounded, saturating at both ends, with the band correction
- * already folded in (it stays in the header only to say what was used). 8 dB
- * throws away detail on purpose: it buys twice the session, 3810 frames, about
- * 31 hours. Where the base comes from is in app/speclog.h - it is measured, not
- * guessed.
+ * A frame is one byte per bin: an absolute dBm, byte = dBm + 185, 1 dB steps,
+ * with the band correction already folded in (it stays in the header only to say
+ * what was used).
+ *
+ * Bit 1 of the header flags says which statistic the bytes hold: clear for the
+ * mean power over the window, set for the strongest reading in it. Both come out
+ * of the same accumulator - see BuildFrame.
  *
  * Wear: every frame slot is written once per session and the header's counter
  * pair once per 16 KiB - roughly once an hour at the default 30 s average.
@@ -151,6 +151,7 @@ static uint32_t storedClock;
 static uint32_t storedFrames;
 static uint32_t storedSeconds;
 static bool     wipeArmed;      // 7 twice, so one fumble cannot erase a night
+static bool     maxMode;        // 3 records the strongest reading, 1 the mean
 
 // Time entry
 static uint8_t clockDigits[6];
@@ -242,10 +243,10 @@ static void WriteHeader(bool closed)
 
     memset(h, 0, sizeof(h));
     memcpy(h, "K5SL", 4);
-    h[0x04] = 5;
+    h[0x04] = 6;
     h[0x05] = LOG_BINS;
     h[0x06] = LOG_BIN_BITS;
-    h[0x07] = closed ? 1 : 0;
+    h[0x07] = (closed ? 1u : 0u) | (maxMode ? 2u : 0u);
     memcpy(&h[0x08], &fStart, 4);
     const uint32_t stepUnits = fStep;   // 10 Hz units, like every frequency here
     memcpy(&h[0x0C], &stepUnits, 4);
@@ -314,7 +315,7 @@ static void BuildFrame(uint8_t *frame)
 
     for (uint16_t i = 0; i < LOG_BINS; i++)
     {
-        const float mean = acc[i] / (float)sweeps;
+        const float mean = maxMode ? acc[i] : acc[i] / (float)sweeps;
 
         // Largest table entry not above the mean: the mean power expressed
         // back in the radio's own half-dB units. mean is never below
@@ -336,10 +337,7 @@ static void BuildFrame(uint8_t *frame)
         else if (level > LOG_LEVELS - 1)
             level = LOG_LEVELS - 1;
 
-        if (i & 1u)
-            frame[i >> 1] |= (uint8_t)(level << 4);
-        else
-            frame[i >> 1] = (uint8_t)level;
+        frame[i] = (uint8_t)level;
     }
 }
 
@@ -403,7 +401,19 @@ static void SweepStep(void)
     uint16_t rssi = ReadRssi();
     if (rssi > 511u)
         rssi = 511u;                 // the register is 9 bits; clamp, never wrap
-    acc[bin] += linTable[rssi];
+
+    // linTable is strictly increasing, so the largest mapped value is the
+    // largest RSSI - one accumulator and one inverse search serve both modes.
+    const float v = linTable[rssi];
+    if (maxMode)
+    {
+        if (v > acc[bin])
+            acc[bin] = v;
+    }
+    else
+    {
+        acc[bin] += v;
+    }
 
     if (++bin < LOG_BINS)
         return;
@@ -492,12 +502,15 @@ static void RenderStartMenu(void)
         LogText(String, 2, 12);
     }
 
-    sprintf(String, "MENU  RECORD %uH%02u",
+    sprintf(String, "1  AVG POWER  %uH%02u",
             (unsigned)(LOG_FRAMES_TOTAL * LOG_AVG_SECONDS / 3600u),
             (unsigned)((LOG_FRAMES_TOTAL * LOG_AVG_SECONDS / 60u) % 60u));
+    LogText(String, 2, 26);
+
+    sprintf(String, "3  MAX HOLD");
     LogText(String, 2, 33);
 
-    sprintf(String, wipeArmed ? "7     AGAIN TO WIPE" : "7     WIPE THE STORE");
+    sprintf(String, wipeArmed ? "7  AGAIN TO WIPE" : "7  WIPE THE STORE");
     LogText(String, 2, 40);
 
     sprintf(String, "EXIT  QUIT");
@@ -608,7 +621,7 @@ static void RenderStatus(void)
 {
     memset(gStatusLine, 0, sizeof(gStatusLine));
 
-    sprintf(String, "LOG %u.%02uV %u%%%s",
+    sprintf(String, "%s %u.%02uV %u%%%s", maxMode ? "MAX" : "AVG",
             (unsigned)(batteryVoltage / 100), (unsigned)(batteryVoltage % 100),
             (unsigned)batteryPercent,
             (batteryPercent < LOG_BATTERY_LOW_PERCENT) ? " LOW" : "");
@@ -668,7 +681,9 @@ static void HandleKey(KEY_Code_t key)
     {
         switch (key)
         {
-        case KEY_MENU:
+        case KEY_1:
+        case KEY_3:
+            maxMode = (key == KEY_3);
             state = LOG_SET_CLOCK;
             clockIndex = 0;
             break;
@@ -867,6 +882,7 @@ void APP_RunSpectrumLogger(void)
     // What is already there first, then the time of day, then recording.
     ReadStored();
     wipeArmed = false;
+    maxMode = false;         // so the status line reads AVG until a mode is picked
     state = LOG_START_MENU;
     clockIndex = 0;
     running = true;

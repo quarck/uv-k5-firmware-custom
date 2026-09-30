@@ -3,8 +3,9 @@
 k5logdump.py -- pull a spectrum-logger session out of the radio's EEPROM.
 
 The logger build (ENABLE_SPECTRUM_LOGGER=1) records one 64-byte frame every 30
-seconds: the mean power of each of 128 bins over that window, two bins to a byte,
-as a level on an 8 dB ladder from -132 dBm with the band correction already applied. This reads the
+seconds: for each of 128 bins, either the mean power over that window or the
+strongest reading in it, whichever mode the operator chose. One byte per bin, an
+absolute dBm (byte = dBm + 185) with the band correction already applied. This reads the
 header, works out how much is valid, fetches only that, and writes CSV.
 
 The wire protocol is k5eeprom.py's -- same session, same 128-byte transfers --
@@ -28,16 +29,16 @@ HEADER_ADDR = 0x03000
 STAMP = 128                        # header record, and each block's first record
 BLOCK_SIZE = STAMP * 128           # 16 KiB
 BINS = 128
-BIN_BITS = 4                       # two bins to a byte
-FRAME_BYTES = BINS * BIN_BITS // 8                      # 64
-FRAMES_PER_BLOCK = (BLOCK_SIZE - STAMP) // FRAME_BYTES  # 254
-FORMAT_VERSION = 5
+BIN_BITS = 8                       # one byte per bin
+FRAME_BYTES = BINS * BIN_BITS // 8                      # 128
+FRAMES_PER_BLOCK = (BLOCK_SIZE - STAMP) // FRAME_BYTES  # 127
+FORMAT_VERSION = 6
 
 # Level ladder, as the firmware currently builds it. These are only a sanity
 # reference: the real ladder and the frame geometry are read from each file's
 # header, so a radio built with a different step or bin width still reads here.
-DBM_BASE = -132
-DBM_STEP = 8
+DBM_BASE = -185
+DBM_STEP = 1
 LEVELS = 1 << BIN_BITS
 
 # One contiguous run ending exactly at the top of a 2 Mbit part. Must match
@@ -158,9 +159,9 @@ class Header:
         self.dbm_step = raw[0x2A]
         self.levels = 1 << self.bin_bits      # 256 would not fit in a header byte
 
-        if self.version not in (3, 4, 5):
+        if self.version not in (3, 4, 5, 6):
             sys.exit(f"header says format version {self.version}, this tool "
-                     f"speaks 3, 4 and 5. Versions 1 and 2 never ran outside "
+                     f"speaks 3 to 6. Versions 1 and 2 never ran outside "
                      f"the workbench.")
         if self.bins != BINS or self.bin_bits not in (4, 8):
             sys.exit(f"unexpected frame shape: {self.bins} bins x "
@@ -193,6 +194,14 @@ class Header:
     def closed(self):
         return bool(self.flags & 1)
 
+    @property
+    def statistic(self):
+        """Which statistic the bytes hold. Only version 6 records it; every
+        earlier version was a mean."""
+        if self.version >= 6 and (self.flags & 2):
+            return "strongest reading in each window"
+        return "mean power over each window"
+
 
 
     def bin_hz(self, i):
@@ -218,7 +227,7 @@ def describe(hdr):
           f"  ({hdr.f_step * 10 / 1000:g} kHz bins, {span / 1e6:g} MHz span)")
     print(f"  frames       {hdr.frames} of {FRAMES_TOTAL}"
           f"  ({hdr.avg_seconds}s each, {hdr.seconds}s logged)")
-    print(f"  values       mean power, {hdr.bin_bits} bits/bin, "
+    print(f"  values       {hdr.statistic}, {hdr.bin_bits} bits/bin, "
           f"{hdr.dbm_step} dB steps"
           f" ({hdr.dbm(0)} to {hdr.dbm(hdr.levels - 1)} dBm)")
     if not hdr.closed:
