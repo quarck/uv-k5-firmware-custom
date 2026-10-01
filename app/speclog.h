@@ -46,6 +46,17 @@
 #define LOG_DBM_BASE         (-185)
 #define LOG_DBM_STEP         1
 #define LOG_LEVELS           256                   // 2^LOG_BIN_BITS
+// AVG mode's integer power accumulator. 3 dB is one doubling and RSSI is in
+// half-dB units, so a reading maps to a linear 2^(rssi/6): the integer part is
+// a shift, the remainder indexes six fixed-point steps. REF is subtracted
+// before the shift and added back in the log domain, because 2^(511/6) fits in
+// nothing - it buys 30 dB of headroom at the top, where signals actually are.
+// CAP keeps 255 summed samples inside a uint64; the mean therefore saturates
+// around +1.5 dBm, which MAX does not.
+#define LOG_ACC_FRAC         6u                    // fixed-point bits
+#define LOG_ACC_REF          60u                   // half-dB floor (-145 dBm)
+#define LOG_ACC_CAP          293u
+
 #define LOG_RSSI_DBM_OFFSET  (-160)                // dBm = rssi/2 + this + band correction
 
 void APP_RunSpectrumLogger(void);

@@ -119,11 +119,19 @@ static uint32_t fMeasure;
 static uint16_t scanReg30;
 static uint16_t bin;
 
-// The window's peak per bin, in the radio's own half-dB RSSI units. A maximum
-// needs no linear-power accumulator and so no floating point: that used to cost
-// 4.1 KB of soft-float and 2 KiB of RAM for a 512-entry table, all of it there
-// only to average power correctly.
-static uint16_t peak[LOG_BINS];
+// One window, two shapes - only one mode runs per session, so they share the
+// space. MAX keeps the strongest RSSI, which is exact. AVG sums linear power
+// the integer way: 3 dB is one doubling and RSSI is in half-dB units, so a
+// reading maps to 2^(rssi/6) - the integer part is a shift, the remainder
+// indexes six fixed-point steps. No floating point anywhere.
+static const uint8_t powFrac[6]  = {64, 72, 81, 91, 102, 114}; // 2^(r/6) << 6
+static const uint8_t log2Frac[8] = {0, 1, 3, 4, 5, 6, 6, 7};   // 8*log2(1+j/8)
+
+static union
+{
+    uint16_t peak[LOG_BINS];
+    uint64_t acc[LOG_BINS];
+} win;
 static uint16_t sweeps;
 static bool     framePending;    // the 30 s are up; emit at the next sweep end
 
@@ -145,6 +153,7 @@ static uint32_t storedClock;
 static uint32_t storedFrames;
 static uint32_t storedSeconds;
 static bool     wipeArmed;      // 7 twice, so one fumble cannot erase a night
+static bool     maxMode;        // 3 records the strongest reading, 1 the mean
 
 // Time entry
 static uint8_t clockDigits[6];
@@ -239,7 +248,7 @@ static void WriteHeader(bool closed)
     h[0x04] = 6;
     h[0x05] = LOG_BINS;
     h[0x06] = LOG_BIN_BITS;
-    h[0x07] = (closed ? 1u : 0u) | 2u;   // bit 1: these are peaks, not means
+    h[0x07] = (closed ? 1u : 0u) | (maxMode ? 2u : 0u);
     memcpy(&h[0x08], &fStart, 4);
     const uint32_t stepUnits = fStep;   // 10 Hz units, like every frequency here
     memcpy(&h[0x0C], &stepUnits, 4);
@@ -291,10 +300,23 @@ static void WriteBlockStamp(void)
 
 static void ResetWindow(void)
 {
-    memset(peak, 0, sizeof(peak));
+    memset(&win, 0, sizeof(win));
     sweeps = 0;
     avgSeconds = 0;
     framePending = false;
+}
+
+// 8 * log2(v), from the top set bit refined by the three below it. v >= 1.
+static uint16_t Log2x8(uint64_t v)
+{
+    uint8_t p = 0;
+
+    for (uint64_t t = v; t >>= 1; )
+        p++;
+
+    const uint8_t j = (p >= 3) ? (uint8_t)((v >> (p - 3)) & 7u)
+                               : (uint8_t)((v << (3 - p)) & 7u);
+    return (uint16_t)(((uint16_t)p << 3) + log2Frac[j]);
 }
 
 static void BuildFrame(uint8_t *frame)
@@ -306,13 +328,30 @@ static void BuildFrame(uint8_t *frame)
     const int32_t bias = 2 * (int32_t)dBmCorrTable[gRxVfo->Band] +
                          2 * (LOG_RSSI_DBM_OFFSET - LOG_DBM_BASE);
 
+    // Dividing the sum by the sweep count is a subtraction in the log domain,
+    // so the mean needs no 64-bit divide either.
+    const int32_t l2s = maxMode ? 0 : (int32_t)Log2x8(sweeps ? sweeps : 1u);
+
     for (uint16_t i = 0; i < LOG_BINS; i++)
     {
-        // peak is already in half-dB, so this is the whole conversion: no table,
-        // no search. The register is 9 bits and bias is at most 50, so the sum
-        // cannot overflow the int32.
-        int32_t level = ((int32_t)peak[i] + bias + LOG_DBM_STEP) /
-                        (2 * LOG_DBM_STEP);
+        int32_t hdb;      // the window's level, in the radio's half-dB units
+
+        if (maxMode)
+        {
+            hdb = win.peak[i];
+        }
+        else if (win.acc[i] == 0u)
+        {
+            hdb = 0;
+        }
+        else
+        {
+            const int32_t d = (int32_t)Log2x8(win.acc[i]) - l2s;
+            hdb = (int32_t)LOG_ACC_REF +
+                  (6 * d - 6 * 8 * (int32_t)LOG_ACC_FRAC + 4) / 8;
+        }
+
+        int32_t level = (hdb + bias + LOG_DBM_STEP) / (2 * LOG_DBM_STEP);
         if (level < 0)
             level = 0;
         else if (level > LOG_LEVELS - 1)
@@ -380,8 +419,18 @@ static void SweepStep(void)
     TuneBin(fStart + (uint32_t)bin * fStep);
 
     const uint16_t rssi = ReadRssi();
-    if (rssi > peak[bin])
-        peak[bin] = rssi;
+    if (maxMode)
+    {
+        if (rssi > win.peak[bin])
+            win.peak[bin] = rssi;
+    }
+    else
+    {
+        uint16_t r = (rssi > LOG_ACC_REF) ? (uint16_t)(rssi - LOG_ACC_REF) : 0u;
+        if (r > LOG_ACC_CAP)
+            r = LOG_ACC_CAP;
+        win.acc[bin] += (uint64_t)powFrac[r % 6u] << (r / 6u);
+    }
 
     if (++bin < LOG_BINS)
         return;
@@ -460,9 +509,12 @@ static void RenderStartMenu(void)
         LogText(String, 2, 12);
     }
 
-    sprintf(String, "MENU  RECORD %uH%02u",
+    sprintf(String, "1  AVG POWER  %uH%02u",
             (unsigned)(LOG_FRAMES_TOTAL * LOG_AVG_SECONDS / 3600u),
             (unsigned)((LOG_FRAMES_TOTAL * LOG_AVG_SECONDS / 60u) % 60u));
+    LogText(String, 2, 26);
+
+    sprintf(String, "3  MAX HOLD");
     LogText(String, 2, 33);
 
     sprintf(String, wipeArmed ? "7     AGAIN TO WIPE" : "7     WIPE THE STORE");
@@ -512,13 +564,15 @@ static void RenderBars(void)
 
     for (uint16_t i = 0; i < LOG_BINS; i++)
     {
-        const uint16_t v = peak[i];
+        const uint16_t v = maxMode ? win.peak[i] : Log2x8(win.acc[i] ? win.acc[i] : 1u);
         if (v < lo) lo = v;
         if (v > hi) hi = v;
     }
 
     // Keep at least 10 dB of scale so a quiet band does not turn noise into
-    // full-height bars.
+    // full-height bars. In AVG mode the values above are 8*log2 rather than
+    // half-dB, so this floor works out at ~7.5 dB there - it only stops the
+    // scale collapsing, and the bars are relative either way.
     if (hi < lo + 20u)
         hi = lo + 20u;
 
@@ -526,7 +580,7 @@ static void RenderBars(void)
 
     for (uint16_t i = 0; i < LOG_BINS; i++)
     {
-        const uint16_t v = peak[i];
+        const uint16_t v = maxMode ? win.peak[i] : Log2x8(win.acc[i] ? win.acc[i] : 1u);
         uint8_t px = (uint8_t)(((uint32_t)(v - lo) * height) / (hi - lo));
         if (px > height)
             px = height;
@@ -576,7 +630,7 @@ static void RenderStatus(void)
 {
     memset(gStatusLine, 0, sizeof(gStatusLine));
 
-    sprintf(String, "MAX %u.%02uV %u%%%s",
+    sprintf(String, "%s %u.%02uV %u%%%s", maxMode ? "MAX" : "AVG",
             (unsigned)(batteryVoltage / 100), (unsigned)(batteryVoltage % 100),
             (unsigned)batteryPercent,
             (batteryPercent < LOG_BATTERY_LOW_PERCENT) ? " LOW" : "");
@@ -636,7 +690,9 @@ static void HandleKey(KEY_Code_t key)
     {
         switch (key)
         {
-        case KEY_MENU:
+        case KEY_1:
+        case KEY_3:
+            maxMode = (key == KEY_3);
             state = LOG_SET_CLOCK;
             clockIndex = 0;
             break;
@@ -833,6 +889,8 @@ void APP_RunSpectrumLogger(void)
     // What is already there first, then the time of day, then recording.
     ReadStored();
     wipeArmed = false;
+    maxMode = true;          // the preferred mode, and what the label shows
+                             // until one of the two keys is pressed
     state = LOG_START_MENU;
     clockIndex = 0;
     running = true;
