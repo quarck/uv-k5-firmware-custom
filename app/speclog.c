@@ -5,23 +5,16 @@
  * mean level of each bin over that window into EEPROM as one 128-byte frame,
  * and stops when the store is full.
  *
- * Averaging is per completed sweep, not per measurement: each sweep adds one
- * sample to every bin's accumulator, so all 128 bins always carry the same
- * sample count and one divisor serves the whole frame. The 30 s timer only
- * arms the write; the frame is emitted at the next sweep boundary, which is
- * why a partial sweep can never skew one bin against its neighbours.
+ * Each frame is the strongest reading each bin saw during its window, not a
+ * mean: on air that is what shows the traffic. The window closes on a completed
+ * sweep rather than on the timer, so a frame is always whole sweeps.
  *
- * It averages POWER, not decibels. RSSI is a log quantity, so summing it would
- * give the geometric mean of power - which for a bin that is quiet for 27 s and
- * carries a signal for 3 s reports something close to the noise floor, hiding
- * exactly the bursty traffic a band logger is for. Samples are therefore mapped
- * to linear power, accumulated, and mapped back at the end of the window.
- *
- * linTable[] holds 10^(halfDb/20) and is built at start-up by repeated
- * multiplication rather than stored: 511 float multiplies cost microseconds
- * once, accumulate about 0.0002 dB of error, and save 2 KiB of flash. Going
- * back to dB is a binary search over the same table, so no logarithm is needed
- * anywhere and the stored format is unchanged.
+ * A peak needs no linear-power accumulation, which is why there is no floating
+ * point here. Averaging power correctly needed a 512-entry table of
+ * 10^(halfDb/20) and dragged in 4.1 KB of soft-float; a maximum is just the
+ * largest RSSI, and RSSI is already logarithmic, so the conversion is three
+ * integer operations. The mean was tried and recorded for two sessions - see
+ * CLAUDE.md for why it went.
  *
  * EEPROM format, all little-endian (k5logdump.py is the reader):
  *
@@ -126,10 +119,11 @@ static uint32_t fMeasure;
 static uint16_t scanReg30;
 static uint16_t bin;
 
-// Averaging window. Float, because the linear span of the RSSI range is far
-// wider than any integer accumulator: bin 0 to bin 511 is 10^25.5.
-static float    linTable[512];
-static float    acc[LOG_BINS];
+// The window's peak per bin, in the radio's own half-dB RSSI units. A maximum
+// needs no linear-power accumulator and so no floating point: that used to cost
+// 4.1 KB of soft-float and 2 KiB of RAM for a 512-entry table, all of it there
+// only to average power correctly.
+static uint16_t peak[LOG_BINS];
 static uint16_t sweeps;
 static bool     framePending;    // the 30 s are up; emit at the next sweep end
 
@@ -151,7 +145,6 @@ static uint32_t storedClock;
 static uint32_t storedFrames;
 static uint32_t storedSeconds;
 static bool     wipeArmed;      // 7 twice, so one fumble cannot erase a night
-static bool     maxMode;        // 3 records the strongest reading, 1 the mean
 
 // Time entry
 static uint8_t clockDigits[6];
@@ -246,7 +239,7 @@ static void WriteHeader(bool closed)
     h[0x04] = 6;
     h[0x05] = LOG_BINS;
     h[0x06] = LOG_BIN_BITS;
-    h[0x07] = (closed ? 1u : 0u) | (maxMode ? 2u : 0u);
+    h[0x07] = (closed ? 1u : 0u) | 2u;   // bit 1: these are peaks, not means
     memcpy(&h[0x08], &fStart, 4);
     const uint32_t stepUnits = fStep;   // 10 Hz units, like every frequency here
     memcpy(&h[0x0C], &stepUnits, 4);
@@ -298,7 +291,7 @@ static void WriteBlockStamp(void)
 
 static void ResetWindow(void)
 {
-    memset(acc, 0, sizeof(acc));
+    memset(peak, 0, sizeof(peak));
     sweeps = 0;
     avgSeconds = 0;
     framePending = false;
@@ -315,23 +308,11 @@ static void BuildFrame(uint8_t *frame)
 
     for (uint16_t i = 0; i < LOG_BINS; i++)
     {
-        const float mean = maxMode ? acc[i] : acc[i] / (float)sweeps;
-
-        // Largest table entry not above the mean: the mean power expressed
-        // back in the radio's own half-dB units. mean is never below
-        // linTable[0], since every sample added was at least that.
-        uint16_t lo = 0, hi = ARRAY_SIZE(linTable) - 1u;
-        while (lo < hi)
-        {
-            const uint16_t mid = (lo + hi + 1u) >> 1;
-            if (linTable[mid] <= mean)
-                lo = mid;
-            else
-                hi = mid - 1u;
-        }
-
-        // Onto the 10 dB ladder, rounded to nearest, saturating at both ends.
-        int32_t level = ((int32_t)lo + bias + LOG_DBM_STEP) / (2 * LOG_DBM_STEP);
+        // peak is already in half-dB, so this is the whole conversion: no table,
+        // no search. The register is 9 bits and bias is at most 50, so the sum
+        // cannot overflow the int32.
+        int32_t level = ((int32_t)peak[i] + bias + LOG_DBM_STEP) /
+                        (2 * LOG_DBM_STEP);
         if (level < 0)
             level = 0;
         else if (level > LOG_LEVELS - 1)
@@ -398,22 +379,9 @@ static void SweepStep(void)
 {
     TuneBin(fStart + (uint32_t)bin * fStep);
 
-    uint16_t rssi = ReadRssi();
-    if (rssi > 511u)
-        rssi = 511u;                 // the register is 9 bits; clamp, never wrap
-
-    // linTable is strictly increasing, so the largest mapped value is the
-    // largest RSSI - one accumulator and one inverse search serve both modes.
-    const float v = linTable[rssi];
-    if (maxMode)
-    {
-        if (v > acc[bin])
-            acc[bin] = v;
-    }
-    else
-    {
-        acc[bin] += v;
-    }
+    const uint16_t rssi = ReadRssi();
+    if (rssi > peak[bin])
+        peak[bin] = rssi;
 
     if (++bin < LOG_BINS)
         return;
@@ -427,16 +395,6 @@ static void SweepStep(void)
         EmitFrame();
     else
         redraw = true;
-}
-
-// 10^(1/20): one half-dB step in the linear domain.
-#define LOG_HALF_DB_RATIO 1.1220185f
-
-static void BuildLinTable(void)
-{
-    linTable[0] = 1.0f;
-    for (uint16_t i = 1; i < ARRAY_SIZE(linTable); i++)
-        linTable[i] = linTable[i - 1] * LOG_HALF_DB_RATIO;
 }
 
 static void StartScan(void)
@@ -502,15 +460,12 @@ static void RenderStartMenu(void)
         LogText(String, 2, 12);
     }
 
-    sprintf(String, "1  AVG POWER  %uH%02u",
+    sprintf(String, "MENU  RECORD %uH%02u",
             (unsigned)(LOG_FRAMES_TOTAL * LOG_AVG_SECONDS / 3600u),
             (unsigned)((LOG_FRAMES_TOTAL * LOG_AVG_SECONDS / 60u) % 60u));
-    LogText(String, 2, 26);
-
-    sprintf(String, "3  MAX HOLD");
     LogText(String, 2, 33);
 
-    sprintf(String, wipeArmed ? "7  AGAIN TO WIPE" : "7  WIPE THE STORE");
+    sprintf(String, wipeArmed ? "7     AGAIN TO WIPE" : "7     WIPE THE STORE");
     LogText(String, 2, 40);
 
     sprintf(String, "EXIT  QUIT");
@@ -557,7 +512,7 @@ static void RenderBars(void)
 
     for (uint16_t i = 0; i < LOG_BINS; i++)
     {
-        const uint16_t v = (uint16_t)(acc[i] / sweeps);
+        const uint16_t v = peak[i];
         if (v < lo) lo = v;
         if (v > hi) hi = v;
     }
@@ -571,7 +526,7 @@ static void RenderBars(void)
 
     for (uint16_t i = 0; i < LOG_BINS; i++)
     {
-        const uint16_t v = (uint16_t)(acc[i] / sweeps);
+        const uint16_t v = peak[i];
         uint8_t px = (uint8_t)(((uint32_t)(v - lo) * height) / (hi - lo));
         if (px > height)
             px = height;
@@ -621,7 +576,7 @@ static void RenderStatus(void)
 {
     memset(gStatusLine, 0, sizeof(gStatusLine));
 
-    sprintf(String, "%s %u.%02uV %u%%%s", maxMode ? "MAX" : "AVG",
+    sprintf(String, "MAX %u.%02uV %u%%%s",
             (unsigned)(batteryVoltage / 100), (unsigned)(batteryVoltage % 100),
             (unsigned)batteryPercent,
             (batteryPercent < LOG_BATTERY_LOW_PERCENT) ? " LOW" : "");
@@ -681,9 +636,7 @@ static void HandleKey(KEY_Code_t key)
     {
         switch (key)
         {
-        case KEY_1:
-        case KEY_3:
-            maxMode = (key == KEY_3);
+        case KEY_MENU:
             state = LOG_SET_CLOCK;
             clockIndex = 0;
             break;
@@ -870,8 +823,6 @@ void APP_RunSpectrumLogger(void)
     RADIO_SetupAGC(false, false);
     BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
 
-    BuildLinTable();
-
     lastKey = KEY_INVALID;   // statics: a previous session left its exit key here
     keySettled = 0;
 
@@ -882,7 +833,6 @@ void APP_RunSpectrumLogger(void)
     // What is already there first, then the time of day, then recording.
     ReadStored();
     wipeArmed = false;
-    maxMode = false;         // so the status line reads AVG until a mode is picked
     state = LOG_START_MENU;
     clockIndex = 0;
     running = true;
