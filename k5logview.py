@@ -2,21 +2,20 @@
 """
 k5logview.py -- turn a k5logdump CSV into a self-contained HTML report.
 
-One heat map for the whole recording: time down, frequency across, one pixel per
-bin per frame. Shading is relative to the session's own noise floor rather than
-an absolute level, because the floor moves with the band, the antenna and the
-AGC - what matters is what rose out of it. Below the map is the text summary:
-what the session was, and every bin that flared at least FLARE dB over that
-floor, with when it was first and last seen.
+One heat map per hour: time down, frequency across, coloured by how far each
+bin stood above that hour's own noise floor rather than by absolute level -
+the floor moves with the band, the antenna and the AGC, and what matters is
+what rose out of it. Under each map is the list of bins that flared, at least
+FLARE dB over that floor.
 
-The map is an inline PNG written by a small pure-Python encoder, so a 16-hour
-session is one image rather than two hundred thousand table cells, and nothing
-is fetched: the report is one file that works offline.
+The maps are inline PNGs, one pixel per bin per frame, so a 15-hour session is
+a handful of images rather than two hundred thousand table cells. Nothing is
+fetched: the report is one file that works offline.
 
     python k5logview.py session.csv                 # -> session.html
     python k5logview.py session.csv -o report.html
-    python k5logview.py session.csv --row-px 2      # taller map
-    python k5logview.py session.csv --text          # terminal view
+    python k5logview.py session.csv --flare 15
+    python k5logview.py session.csv --text          # the old terminal view
 """
 
 import argparse
@@ -102,34 +101,30 @@ def noise_floor(flat):
 
 
 def analyse(frames, freqs, flare_db):
-    """One pass over the whole recording: floor, flares, and when each was up."""
-    flat = [v for _, values in frames for v in values]
-    floor, clipping = noise_floor(flat)
+    """Group into hours and work out floor, flares and cells for each."""
+    hours = {}
+    for t, values in frames:
+        hours.setdefault(t // 3600, []).append((t, values))
 
-    flares = []
-    for i, f in enumerate(freqs):
-        column = [values[i] for _, values in frames]
-        peak = max(column)
-        if peak - floor < flare_db:
-            continue
-        hits = [n for n, v in enumerate(column) if v - floor >= flare_db]
-        flares.append({"freq": f, "peak": peak, "over": peak - floor,
-                       "hits": len(hits), "frames": len(frames),
-                       "first": frames[hits[0]][0], "last": frames[hits[-1]][0]})
-    flares.sort(key=lambda d: (-d["peak"], d["freq"]))
+    out = []
+    for hour in sorted(hours):
+        block = hours[hour]
+        flat = [v for _, values in block for v in values]
+        floor, clipping = noise_floor(flat)
 
-    return {"floor": floor, "clipping": clipping, "flares": flares}
+        flares = []
+        for i, f in enumerate(freqs):
+            column = [values[i] for _, values in block]
+            peak = max(column)
+            if peak - floor >= flare_db:
+                hits = sum(1 for v in column if v - floor >= flare_db)
+                flares.append({"freq": f, "peak": peak, "over": peak - floor,
+                               "hits": hits, "frames": len(block)})
+        flares.sort(key=lambda d: (-d["peak"], d["freq"]))
 
-
-def hour_marks(frames):
-    """Row indices where the clock hour changes, for the time axis."""
-    marks = [(0, frames[0][0])]
-    for n in range(1, len(frames)):
-        if frames[n][0] // 3600 != frames[n - 1][0] // 3600:
-            marks.append((n, frames[n][0]))
-    if len(frames) > 1:
-        marks.append((len(frames) - 1, frames[-1][0]))
-    return marks
+        out.append({"hour": hour, "frames": block, "floor": floor,
+                    "clipping": clipping, "flares": flares})
+    return out
 
 
 # ------------------------------------------------------------------- image ---
@@ -161,10 +156,10 @@ def png(width, height, rows_rgb):
             + chunk(b"IEND", b""))
 
 
-def heat_png(frames, floor, bins):
+def heat_png(block, floor, bins):
     lut = {}
     rows = []
-    for _, values in frames:
+    for _, values in block:
         row = bytearray()
         for v in values:
             d = v - floor
@@ -204,12 +199,10 @@ section{background:var(--card);border:1px solid var(--line);border-radius:10px;
 .tcol span{position:absolute;right:8px;transform:translateY(-50%);
            font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;
            white-space:nowrap}
-.tcol span::after{content:"";position:absolute;right:-6px;top:50%;width:4px;
-                  height:1px;background:var(--rule)}
 .img{position:relative}
-.img img{display:block;width:100%;max-width:100%;min-height:48px;
-         image-rendering:pixelated;image-rendering:crisp-edges;border-radius:2px}
-.ruler{display:grid;grid-template-columns:58px 1fr;margin-top:3px}
+.img img{display:block;width:100%;image-rendering:pixelated;
+         image-rendering:crisp-edges;border-radius:3px}
+.ruler{display:grid;grid-template-columns:58px 1fr;margin-top:2px}
 .ruler div{position:relative;height:18px}
 .ruler span{position:absolute;transform:translateX(-50%);font-size:11px;
             color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -217,8 +210,6 @@ section{background:var(--card);border:1px solid var(--line);border-radius:10px;
          color:#fff;font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
          padding:3px 6px;border-radius:4px;opacity:0;pointer-events:none;
          transition:opacity .1s;white-space:nowrap}
-.tscroll{overflow-x:auto;margin-top:16px;border:1px solid var(--rule);
-         border-radius:3px;background:var(--card)}
 table{border-collapse:collapse;width:100%;margin-top:14px;font-size:13px;
       font-variant-numeric:tabular-nums}
 th,td{text-align:right;padding:4px 8px;border-bottom:1px solid var(--line)}
@@ -258,87 +249,98 @@ def esc(text):
     return html.escape(str(text), quote=True)
 
 
-def heat_map(frames, freqs, floor, args):
-    """The whole recording as one image, with a time gutter and a frequency
-    ruler. One row per frame, so one row per averaging window - a lost frame
-    shortens the map rather than leaving a gap in it."""
+def hour_section(h, freqs, flare_db):
+    block, floor = h["frames"], h["floor"]
     bins = len(freqs)
-    rows = len(frames)
-    img = b64(heat_png(frames, floor, bins))
+    rows = len(block)
+    span = f"{hhmmss(h['hour'] * 3600)} – {hhmmss((h['hour'] + 1) * 3600)}"
+
+    img = b64(heat_png(block, floor, bins))
     levels = bytes(max(0, min(255, v - HOVER_BASE))
-                   for _, values in frames for v in values)
-    times = ",".join(hhmmss(t) for t, _ in frames)
+                   for _, values in block for v in values)
+    times = ",".join(hhmmss(t) for t, _ in block)
 
-    tlabels = "".join(
-        f'<span style="top:{(n + 0.5) / rows * 100:.4f}%">{hhmmss(t)}</span>'
-        for n, t in hour_marks(frames))
+    # A few time labels down the side, and frequency labels under the map.
+    tlabels = []
+    for k in range(min(6, rows)):
+        row = k * (rows - 1) // max(1, min(6, rows) - 1) if rows > 1 else 0
+        pct = (row + 0.5) / rows * 100
+        tlabels.append(f'<span style="top:{pct:.3f}%">{hhmmss(block[row][0])}</span>')
 
-    flabels = "".join(
-        f'<span style="left:{(i + 0.5) / bins * 100:.4f}%">{freqs[i]:.3f}</span>'
-        for i in (k * (bins - 1) // 4 for k in range(5)))
+    flabels = []
+    for k in range(5):
+        i = k * (bins - 1) // 4
+        pct = (i + 0.5) / bins * 100
+        flabels.append(f'<span style="left:{pct:.3f}%">{freqs[i]:.3f}</span>')
 
-    # The map's natural aspect is one pixel per bin by one per frame. Scaling to
-    # the page width stretches it ~6.6x horizontally, and letting the height
-    # follow would make a long session absurdly tall - so set the aspect ratio
-    # directly: yscale 1.0 is the natural shape, 0.5 half as tall. CSS does the
-    # arithmetic, so it stays right at any page width.
-    ratio = f"{bins} / {rows * args.yscale:.3f}"
-    return (f'<div class="map"><div class="tcol">{tlabels}</div>'
-            f'<div class="img" data-bins="{bins}" data-rows="{rows}" '
-            f'data-f0="{freqs[0]:.6f}" '
-            f'data-df="{(freqs[1] - freqs[0]) if bins > 1 else 0:.6f}" '
-            f'data-times="{esc(times)}" data-levels="{b64(levels)}">'
-            f'<img alt="heat map of the whole session" '
-            f'style="aspect-ratio:{ratio}" '
-            f'src="data:image/png;base64,{img}">'
-            f'<div class="readout"></div></div></div>'
-            f'<div class="ruler"><div></div><div>{flabels}</div></div>')
+    parts = [f'<section><h2>{span} <span class="meta">· {rows} frames '
+             f'· noise floor {floor} dBm</span></h2>']
+    if h["clipping"]:
+        parts.append(f'<p class="warn">{esc(h["clipping"])}</p>')
+
+    parts.append(
+        f'<div class="map"><div class="tcol">{"".join(tlabels)}</div>'
+        f'<div class="img" data-bins="{bins}" data-rows="{rows}" '
+        f'data-f0="{freqs[0]:.6f}" data-df="{(freqs[1] - freqs[0]) if bins > 1 else 0:.6f}" '
+        f'data-times="{esc(times)}" data-levels="{b64(levels)}">'
+        f'<img alt="heat map, {span}" src="data:image/png;base64,{img}">'
+        f'<div class="readout"></div></div></div>'
+        f'<div class="ruler"><div></div><div>{"".join(flabels)}</div></div>')
+
+    if not h["flares"]:
+        parts.append(f'<p class="none">Nothing rose {flare_db} dB above the floor.</p>')
+    else:
+        parts.append(
+            '<table><thead><tr><th>frequency</th><th>peak</th><th>over floor</th>'
+            '<th>frames</th><th>of hour</th><th></th></tr></thead><tbody>')
+        for f in h["flares"]:
+            pct = 100 * f["hits"] / f["frames"]
+            parts.append(
+                f'<tr><td>{f["freq"]:.4f} MHz</td><td>{f["peak"]} dBm</td>'
+                f'<td>+{f["over"]}</td><td>{f["hits"]} / {f["frames"]}</td>'
+                f'<td>{pct:.0f}%</td>'
+                f'<td><span class="bar" style="width:{max(2, pct * 0.6):.0f}px"></span></td></tr>')
+        parts.append('</tbody></table>')
+
+    parts.append('</section>')
+    return "".join(parts)
 
 
-def render_html(path, freqs, frames, session, args):
-    floor = session["floor"]
+def render_html(path, freqs, frames, hours, args):
     grad = ",".join(f"rgb{ramp(d)} {min(100, d / STOPS[-1][0] * 100):.0f}%"
                     for d, _ in STOPS)
-    span = frames[-1][0] - frames[0][0]
+
+    seen = {}
+    for h in hours:
+        for f in h["flares"]:
+            was = seen.get(f["freq"], [0, 0, -999])
+            seen[f["freq"]] = [was[0] + 1, was[1] + f["hits"], max(was[2], f["peak"])]
 
     body = [f'<div class="wrap"><h1>{esc(path)}</h1>',
-            f'<p class="sub">{len(frames)} frames &middot; '
-            f'{hhmmss(frames[0][0])} to {hhmmss(frames[-1][0])} '
-            f'({span // 3600} h {span % 3600 // 60:02d} min) &middot; '
-            f'{len(freqs)} bins &middot; {freqs[0]:.4f}&ndash;{freqs[-1]:.4f} MHz '
-            f'&middot; rendered {datetime.now():%Y-%m-%d %H:%M}</p>']
+            f'<p class="sub">{len(frames)} frames · {len(freqs)} bins · '
+            f'{freqs[0]:.4f}–{freqs[-1]:.4f} MHz · '
+            f'{hhmmss(frames[0][0])} to {hhmmss(frames[-1][0])} · '
+            f'{len(hours)} hour(s) · flare threshold {args.flare} dB · '
+            f'rendered {datetime.now():%Y-%m-%d %H:%M}</p>',
+            f'<section><h2>Colour <span class="meta">· dB above that hour\'s '
+            f'noise floor</span></h2><div class="legend"><span>floor</span>'
+            f'<div class="grad" style="background:linear-gradient(90deg,{grad})"></div>'
+            f'<span>+{STOPS[-1][0]} dB</span></div>']
 
-    if session["clipping"]:
-        body.append(f'<p class="warn">{esc(session["clipping"])}</p>')
-
-    body.append(heat_map(frames, freqs, floor, args))
-    body.append(f'<div class="legend"><span>noise floor {floor} dBm</span>'
-                f'<div class="grad" style="background:linear-gradient(90deg,{grad})">'
-                f'</div><span>+{STOPS[-1][0]} dB</span></div>')
-
-    body.append('<h2>Summary</h2>')
-    if not session["flares"]:
-        body.append(f'<p class="none">Nothing rose {args.flare} dB above the '
-                    f'{floor} dBm floor in the whole recording.</p>')
+    if seen:
+        body.append('<table><thead><tr><th>frequency</th><th>hours seen</th>'
+                    '<th>frames</th><th>peak</th></tr></thead><tbody>')
+        for f, (nh, hits, peak) in sorted(seen.items(), key=lambda kv: -kv[1][1]):
+            body.append(f'<tr><td>{f:.4f} MHz</td><td>{nh}</td><td>{hits}</td>'
+                        f'<td>{peak} dBm</td></tr>')
+        body.append('</tbody></table>')
     else:
-        body.append(
-            f'<p class="sub">{len(session["flares"])} of {len(freqs)} bins rose at '
-            f'least {args.flare} dB above the floor at some point. "Up" counts the '
-            f'frames in which a bin was that far above it.</p>'
-            '<div class="tscroll"><table><thead><tr><th>frequency</th><th>peak</th>'
-            '<th>over floor</th><th>up</th><th>of session</th><th>first</th>'
-            '<th>last</th><th></th></tr></thead><tbody>')
-        for f in session["flares"]:
-            pct = 100 * f["hits"] / f["frames"]
-            body.append(
-                f'<tr><td>{f["freq"]:.4f} MHz</td><td>{f["peak"]} dBm</td>'
-                f'<td>+{f["over"]}</td><td>{f["hits"]}</td>'
-                f'<td>{pct:.1f}%</td><td>{hhmmss(f["first"])}</td>'
-                f'<td>{hhmmss(f["last"])}</td>'
-                f'<td><span class="bar" style="width:{max(2, pct * 0.6):.0f}px">'
-                f'</span></td></tr>')
-        body.append('</tbody></table></div>')
+        body.append(f'<p class="none">Nothing reached {args.flare} dB over the '
+                    f'floor in any hour.</p>')
+    body.append('</section>')
 
+    for h in hours:
+        body.append(hour_section(h, freqs, args.flare))
     body.append('</div>')
 
     return ("<!doctype html><html><head><meta charset=\"utf-8\">"
@@ -374,45 +376,45 @@ def fold_axis(freqs, width):
     return [freqs[i * n // width] for i in range(width)]
 
 
-def render_text(freqs, frames, session, args):
-    floor = session["floor"]
+def render_text(freqs, hours, args):
     legend = "  ".join(f"{RAMP[i]!r}={i * STEP}+" for i in range(1, len(RAMP)))
-    print(f"shading, dB over the {floor} dBm noise floor: {legend}")
-    if session["clipping"]:
-        print(f"! {session['clipping']}")
+    print(f"shading, dB over that hour's floor: {legend}")
 
-    width = min(args.width, len(freqs))
-    shown = fold_axis(freqs, width)
-    ticks = [" "] * width
-    labels = [" "] * width
-    for c in range(0, width, 16):
-        ticks[c] = "|"
-        for k, ch in enumerate(f"{shown[c]:.3f}"):
-            if c + k < width:
-                labels[c + k] = ch
-    print(" " * 9 + "".join(ticks))
-    print(" " * 9 + "".join(labels))
+    for h in hours:
+        block, floor = h["frames"], h["floor"]
+        span = f"{hhmmss(h['hour'] * 3600)}-{hhmmss((h['hour'] + 1) * 3600)}"
+        print(f"\n=== {span}   {len(block)} frames, noise floor {floor} dBm ===")
+        if h["clipping"]:
+            print(f"{'':9}! {h['clipping']}")
 
-    # One row per bucket across the whole session; a cell keeps the strongest
-    # sample in it, so a single burst still shows after folding.
-    buckets = max(1, min(args.rows or len(frames), len(frames)))
-    for b in range(buckets):
-        lo = b * len(frames) // buckets
-        hi = max(lo + 1, (b + 1) * len(frames) // buckets)
-        cells = [max(col) for col in zip(*(fold(v, width) for _, v in frames[lo:hi]))]
-        line = "".join(shade(v - floor, args.color) for v in cells)
-        print(f"{hhmmss(frames[lo][0]):>8} {line}")
+        width = min(args.width, len(freqs))
+        shown = fold_axis(freqs, width)
+        ticks = [" "] * width
+        labels = [" "] * width
+        for c in range(0, width, 16):
+            ticks[c] = "|"
+            for k, ch in enumerate(f"{shown[c]:.3f}"):
+                if c + k < width:
+                    labels[c + k] = ch
+        print(" " * 9 + "".join(ticks))
+        print(" " * 9 + "".join(labels))
 
-    if not session["flares"]:
-        print(f"\nnothing rose {args.flare} dB above the floor")
-        return
-    print(f"\nflares, at least {args.flare} dB over the floor:")
-    print(f"  {'frequency':>13}  {'peak':>8}  {'over':>5}  {'up':>5}  "
-          f"{'of ses':>6}  {'first':>8}  {'last':>8}")
-    for f in session["flares"]:
-        print(f"  {f['freq']:9.4f} MHz  {f['peak']:5d} dBm  {f['over']:+5d}  "
-              f"{f['hits']:5d}  {100 * f['hits'] / f['frames']:5.1f}%  "
-              f"{hhmmss(f['first'])}  {hhmmss(f['last'])}")
+        buckets = max(1, min(args.rows or len(block), len(block)))
+        for b in range(buckets):
+            lo = b * len(block) // buckets
+            hi = max(lo + 1, (b + 1) * len(block) // buckets)
+            cells = [max(col) for col in zip(*(fold(v, width) for _, v in block[lo:hi]))]
+            line = "".join(shade(v - floor, args.color) for v in cells)
+            print(f"{hhmmss(block[lo][0]):>8} {line}")
+
+        if not h["flares"]:
+            print(f"{'':9}nothing above the floor by {args.flare} dB")
+            continue
+        print(f"{'':9}flares, at least {args.flare} dB over floor:")
+        for f in h["flares"]:
+            print(f"{'':11}{f['freq']:9.4f} MHz  peak {f['peak']:5d} dBm "
+                  f"(+{f['over']:2d})  {f['hits']:4d}/{f['frames']:<4d} frames  "
+                  f"{100 * f['hits'] / f['frames']:3.0f}%")
 
 
 def main():
@@ -421,31 +423,25 @@ def main():
     ap.add_argument("csv", help="a CSV written by k5logdump.py")
     ap.add_argument("-o", "--out", help="HTML file to write (default: alongside the CSV)")
     ap.add_argument("--flare", type=int, default=10,
-                    help="dB over the session's noise floor that counts as a flare")
+                    help="dB over the hour's noise floor that counts as a flare")
     ap.add_argument("--text", action="store_true", help="print to the terminal instead")
-    ap.add_argument("--yscale", type=float, default=0.5,
-                    help="map height as a fraction of its natural aspect "
-                         "(0.5 = half as tall as it is wide-per-pixel; 1.0 = square pixels)")
-    ap.add_argument("--rows", type=int, default=40,
-                    help="text: time rows for the whole session (0 = one per frame)")
+    ap.add_argument("--rows", type=int, default=12, help="text: time rows per hour")
     ap.add_argument("--width", type=int, default=128, help="text: max columns")
     ap.add_argument("--color", action="store_true", help="text: ANSI colour")
     args = ap.parse_args()
 
     freqs, frames = load(args.csv)
-    session = analyse(frames, freqs, args.flare)
-    span = frames[-1][0] - frames[0][0]
+    hours = analyse(frames, freqs, args.flare)
     print(f"{args.csv}: {len(frames)} frames, {len(freqs)} bins "
           f"{freqs[0]:.4f}-{freqs[-1]:.4f} MHz, "
-          f"{hhmmss(frames[0][0])} to {hhmmss(frames[-1][0])} "
-          f"({span // 3600}h {span % 3600 // 60:02d}m)")
+          f"{hhmmss(frames[0][0])} to {hhmmss(frames[-1][0])}, {len(hours)} hour(s)")
 
     if args.text:
-        render_text(freqs, frames, session, args)
+        render_text(freqs, hours, args)
         return 0
 
     out = args.out or (args.csv.rsplit(".", 1)[0] + ".html")
-    doc = render_html(args.csv, freqs, frames, session, args)
+    doc = render_html(args.csv, freqs, frames, hours, args)
     with open(out, "w") as f:
         f.write(doc)
     print(f"  wrote {out}  ({len(doc) / 1024:.0f} KB)")
