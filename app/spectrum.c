@@ -33,8 +33,6 @@
 #endif
 
 #include "driver/backlight.h"
-#include "driver/crc.h"
-#include "driver/uart.h"
 #include "frequencies.h"
 #include "ui/helper.h"
 #include "ui/main.h"
@@ -128,16 +126,6 @@ static void HoldReset(void)
     memset(holdRow, HOLD_NONE, sizeof(holdRow));
     holdTicks = 0;
 }
-
-// Live UART stream (F+7). Per bin, the strongest reading of the current second
-// - a maximum, so the whole path stays integer. streamMax is in the radio's own
-// half-dB RSSI units and is cleared every time a packet goes out.
-static bool     streamMode;
-static uint16_t streamMax[128];
-static uint16_t streamSeq;
-static uint16_t streamSweeps;
-static uint32_t streamElapsed;
-static uint8_t  streamTicks;
 
 // Cached REG_30 value for scan steps: avoids re-reading it on every SetFScan()
 // call (saves 1 SPI read per step = fewer SPI bus events = less SPI-induced audio interference).
@@ -460,13 +448,6 @@ static void SetFScan(uint32_t f)
 
 static bool IsPeakOverOpenLevel()
 {
-    // Streaming must not stop to listen: opening the audio parks the sweep on
-    // one frequency, and the second that follows reports no sweeps and a band
-    // of floor readings. Manual monitoring still works - monitorMode is tested
-    // separately by the caller.
-    if (streamMode)
-        return false;
-
     uint16_t openLevel = settings.rssiTriggerLevel;
     if (openLevel <= (uint16_t)(RSSI_MAX_VALUE - LISTEN_OPEN_HYST_RSSI))
         openLevel += LISTEN_OPEN_HYST_RSSI;
@@ -886,15 +867,6 @@ static void Measure()
 {
     uint16_t rssi = scanInfo.rssi = GetRssi();
     SetRssiHistory(scanInfo.i, rssi);
-
-    if (streamMode)
-    {
-        // Same slot mapping the display uses, so a streamed bin and a drawn
-        // bin are always the same piece of spectrum.
-        const uint8_t slot = GetHistorySlot(scanInfo.i);
-        if (rssi > streamMax[slot])
-            streamMax[slot] = rssi;
-    }
 }
 
 static void RequestAutoTriggerRecalibration()
@@ -2095,53 +2067,6 @@ static bool NextScanStepInterlaced()
 }
 #endif
 
-// One packet per second. Everything here is integer: the payload is the
-// strongest RSSI each bin saw, mapped straight onto dBm + 185.
-static void SendStreamFrame(void)
-{
-    uint8_t pkt[SPECTRUM_STREAM_BYTES];
-    const uint8_t bars = GetBarCount();
-    const int16_t dbmBase = SPECTRUM_STREAM_DBM_BASE;
-    const int32_t bias = 2 * (int32_t)dBmCorrTable[gRxVfo->Band] +
-                         2 * (SPECTRUM_STREAM_RSSI_OFF - SPECTRUM_STREAM_DBM_BASE);
-    const uint32_t fStart = GetFStart();
-    const uint16_t fStep = GetScanStep();
-
-    // Only the unused tail needs clearing; every other byte is written below.
-    memset(&pkt[SPECTRUM_STREAM_HEAD + bars], 0, SPECTRUM_STREAM_BINS - bars);
-    pkt[0] = 'K';
-    pkt[1] = '5';
-    pkt[2] = SPECTRUM_STREAM_VERSION;
-    pkt[3] = bars;
-    memcpy(&pkt[4], &streamSeq, 2);
-    memcpy(&pkt[6], &streamElapsed, 4);
-    memcpy(&pkt[10], &fStart, 4);
-    memcpy(&pkt[14], &fStep, 2);
-    memcpy(&pkt[16], &streamSweeps, 2);
-    memcpy(&pkt[18], &dbmBase, 2);
-    pkt[20] = 1;                                     // 1 dB per step
-    pkt[21] = (uint8_t)dBmCorrTable[gRxVfo->Band];
-
-    // bias is 2*corr + 50 and dBmCorrTable runs -25..-1, so it is never
-    // negative and the sum cannot underflow - only the top needs clamping.
-    for (uint8_t i = 0; i < bars; i++)
-    {
-        const uint32_t v = ((uint32_t)streamMax[i] + (uint32_t)bias + 1u) >> 1;
-        pkt[SPECTRUM_STREAM_HEAD + i] = (v > 255u) ? 255u : (uint8_t)v;
-        streamMax[i] = 0;               // clear as we go, no second pass
-    }
-
-    const uint16_t crc = CRC_Calculate1(pkt, SPECTRUM_STREAM_HEAD + SPECTRUM_STREAM_BINS);
-    memcpy(&pkt[SPECTRUM_STREAM_HEAD + SPECTRUM_STREAM_BINS], &crc, 2);
-
-    // 152 bytes a second is 4% of 38400 baud, and the send is polled, so it
-    // costs the sweep about 40 ms once a second.
-    UART_Send(pkt, sizeof(pkt));
-
-    streamSeq++;
-    streamSweeps = 0;
-}
-
 static void FinalizeCompletedSweep()
 {
     if (! (scanInfo.measurementsCount >> 7)) // if (scanInfo.measurementsCount < 128)
@@ -2161,9 +2086,6 @@ static void FinalizeCompletedSweep()
             newMax = 10;
         settings.dbMax = newMax;
     }
-
-    if (streamMode)
-        streamSweeps++;
 
     // Next full sweep starts from the opposite side to avoid directional bias.
     scanStartFromLeft = !scanStartFromLeft;
@@ -2379,13 +2301,6 @@ static void Tick()
     {
         gNextTimeslice_500ms = false;
 
-        if (streamMode && ++streamTicks >= 2)
-        {
-            streamTicks = 0;
-            streamElapsed++;
-            SendStreamFrame();
-        }
-
         // Wall clock, not sweeps: the window stays 5-10 s whatever the bin
         // count and scan speed do.
         if (manualSetFlag && ++holdTicks >= HOLD_BUCKET_500MS)
@@ -2454,22 +2369,15 @@ static void Tick()
         renderPage = 0;
 }
 
-static void RunSpectrum(bool stream)
+void APP_RunSpectrum(void)
 {
-    streamMode = stream;
-    streamSeq = 0;
-    streamSweeps = 0;
-    streamElapsed = 0;
-    streamTicks = 0;
-    memset(streamMax, 0, sizeof(streamMax));
-
     settings.backlightState = gEeprom.BACKLIGHT_TIME == 0 ? false : true;
 
     // TX here coz it always? set to active VFO
     vfo = gEeprom.TX_VFO;
     // No persistence by design: every run starts from the defaults above, so
     // the analyser always opens at a known 128 bins x 12.5 kHz - a 1.6 MHz
-    // window, and the full 128 bins the stream packet carries.
+    // window.
     ApplyDefaultSettings();
 
     // set the current frequency in the middle of the display
@@ -2511,15 +2419,4 @@ static void RunSpectrum(bool stream)
     }
 
     BACKLIGHT_TurnOn();
-    streamMode = false;
-}
-
-void APP_RunSpectrum(void)
-{
-    RunSpectrum(false);
-}
-
-void APP_RunSpectrumStream(void)
-{
-    RunSpectrum(true);
 }

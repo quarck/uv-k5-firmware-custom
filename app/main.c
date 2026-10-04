@@ -38,6 +38,7 @@
 
 #ifdef ENABLE_SPECTRUM_LOGGER
 #include "app/speclog.h"
+#include "app/widelog.h"
 #endif
 
 #include "audio.h"
@@ -250,11 +251,9 @@ gBeepToPlay = BEEP_500HZ_60MS_DOUBLE_BEEP_OPTIONAL;
             break;
 
         case KEY_7:
-#if defined(ENABLE_SPECTRUM)
-            // The spectrum, with the live UART stream running. Same app as
-            // F+5, one flag different - it already owns a sweep engine, and a
-            // second copy of one did not fit in this firmware.
-            APP_RunSpectrumStream();
+#ifdef ENABLE_SPECTRUM_LOGGER
+            // The wide logger: 204.8 MHz in one sweep, an hour a frame.
+            APP_RunSpectrumWide();
             gRequestDisplayScreen = DISPLAY_MAIN;
 #elif defined(ENABLE_VOX)
             ACTION_Vox();

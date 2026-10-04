@@ -2,46 +2,49 @@
 """
 k5logview.py -- turn a k5logdump CSV into a self-contained HTML report.
 
-One heat map per hour: time down, frequency across, coloured by how far each
-bin stood above that hour's own noise floor rather than by absolute level -
-the floor moves with the band, the antenna and the AGC, and what matters is
-what rose out of it. Under each map is the list of bins that flared, at least
-FLARE dB over that floor.
+The band is cut into regions of at most REGION bins and each gets its own heat
+map covering the whole session: frequency across, time down. One map of
+everything does not work for a wide recording - 8192 bins against 30 hourly
+frames is a strip a few pixels tall - and splitting by hour instead gives maps
+with one row each.
 
-The maps are inline PNGs, one pixel per bin per frame, so a 15-hour session is
-a handful of images rather than two hundred thousand table cells. Nothing is
-fetched: the report is one file that works offline.
+Because a day of hourly frames is only ~24 rows, the maps are interpolated
+rather than drawn as blocks: bilinear in time, so a channel that came and went
+reads as a gradient instead of a staircase.
+
+Below the maps is the text summary: the session's noise floor and every bin that
+rose at least FLARE dB above it, with when it was first and last seen.
 
     python k5logview.py session.csv                 # -> session.html
     python k5logview.py session.csv -o report.html
-    python k5logview.py session.csv --flare 15
-    python k5logview.py session.csv --text          # the old terminal view
+    python k5logview.py session.csv --region 128    # narrower slices
+    python k5logview.py session.csv --text          # terminal view
 """
 
 import argparse
 import base64
 import csv
 import html
+import math
 import struct
 import sys
 import zlib
 from datetime import datetime
 from statistics import median
 
-# Terminal view only.
-STEP = 5
-RAMP = " .:+*#@"
-COLOURS = (244, 250, 228, 220, 208, 202, 199)
+REGION = 256          # bins per map, at most
+MIN_ROWS = 120        # interpolate time up to at least this many pixel rows
+MAX_ROWS = 720        # and never draw more than this
 
-# Heat-map ramp, keyed by dB over the hour's floor. Dark and desaturated at the
-# floor so that noise recedes, bright and warm where something stood up.
+# Heat ramp, keyed by dB over the session floor. Dark and desaturated at the
+# floor so noise recedes, warm where something stood up.
 STOPS = ((0, (16, 20, 30)), (4, (26, 48, 92)), (8, (24, 106, 138)),
          (14, (32, 160, 112)), (20, (148, 194, 62)), (28, (246, 204, 60)),
          (38, (250, 124, 44)), (50, (255, 74, 74)))
 
-# The byte a level is stored as in the report's hover data, matching the
-# logger's own encoding so the two never disagree about what a byte means.
-HOVER_BASE = -185
+# Terminal view only.
+STEP = 5
+RAMP = " .:+*#@"
 
 
 def hhmmss(seconds):
@@ -79,14 +82,12 @@ def load(path):
 
 
 def noise_floor(flat):
-    """The hour's floor, and a note if the log clipped it.
+    """The session's floor, and a note if the log clipped it.
 
     When the band is quieter than the lowest level the logger can store, most
     bins read that level and the median becomes the rail itself rather than a
     measurement - everything then looks 10 dB "over the floor". Where that
-    happens, take the floor from the samples that did measure something and say
-    so; the answer is a lower bound either way.
-    """
+    happens, take the floor from the samples that did measure something."""
     rail = min(flat)
     clipped = flat.count(rail) / len(flat)
     if clipped < 0.25:
@@ -96,35 +97,27 @@ def noise_floor(flat):
     floor = int(median(above)) if above else rail
     return floor, (f"{clipped:.0%} of samples sit at {rail} dBm, the bottom of "
                    f"the log's range - the true floor is below it, so this "
-                   f"hour's floor is taken from the rest and flare sizes are "
-                   f"lower bounds")
+                   f"floor is taken from the rest and flare sizes are lower "
+                   f"bounds")
 
 
 def analyse(frames, freqs, flare_db):
-    """Group into hours and work out floor, flares and cells for each."""
-    hours = {}
-    for t, values in frames:
-        hours.setdefault(t // 3600, []).append((t, values))
+    """The floor, and every bin that rose flare_db above it."""
+    flat = [v for _, values in frames for v in values]
+    floor, clipping = noise_floor(flat)
 
-    out = []
-    for hour in sorted(hours):
-        block = hours[hour]
-        flat = [v for _, values in block for v in values]
-        floor, clipping = noise_floor(flat)
-
-        flares = []
-        for i, f in enumerate(freqs):
-            column = [values[i] for _, values in block]
-            peak = max(column)
-            if peak - floor >= flare_db:
-                hits = sum(1 for v in column if v - floor >= flare_db)
-                flares.append({"freq": f, "peak": peak, "over": peak - floor,
-                               "hits": hits, "frames": len(block)})
-        flares.sort(key=lambda d: (-d["peak"], d["freq"]))
-
-        out.append({"hour": hour, "frames": block, "floor": floor,
-                    "clipping": clipping, "flares": flares})
-    return out
+    flares = []
+    for i, f in enumerate(freqs):
+        column = [values[i] for _, values in frames]
+        peak = max(column)
+        if peak - floor < flare_db:
+            continue
+        hits = [n for n, v in enumerate(column) if v - floor >= flare_db]
+        flares.append({"bin": i, "freq": f, "peak": peak, "over": peak - floor,
+                       "hits": len(hits), "frames": len(frames),
+                       "first": frames[hits[0]][0], "last": frames[hits[-1]][0]})
+    flares.sort(key=lambda d: d["bin"])      # up the band, not by strength
+    return {"floor": floor, "clipping": clipping, "flares": flares}
 
 
 # ------------------------------------------------------------------- image ---
@@ -142,8 +135,8 @@ def ramp(delta):
 
 def png(width, height, rows_rgb):
     """Minimal 8-bit truecolour PNG. No dependencies, and small: a heat map is
-    mostly flat colour, which is exactly what zlib is good at."""
-    raw = b"".join(b"\x00" + row for row in rows_rgb)    # filter 0 per scanline
+    mostly smooth, which is what zlib is good at."""
+    raw = b"".join(b"\x00" + row for row in rows_rgb)      # filter 0 per line
 
     def chunk(tag, data):
         body = tag + data
@@ -156,18 +149,42 @@ def png(width, height, rows_rgb):
             + chunk(b"IEND", b""))
 
 
-def heat_png(block, floor, bins):
-    lut = {}
-    rows = []
-    for _, values in block:
+def region_png(frames, lo, hi, floor, out_rows):
+    """One region as a PNG: columns are bins lo..hi, rows are interpolated time.
+
+    Bilinear in time only. Frequency is left at one pixel per bin - the bins are
+    real measurements 25 kHz apart and smoothing across them would invent
+    structure between channels, where smoothing in time only fills in between
+    two readings of the same channel."""
+    rows_in = len(frames)
+    cols = hi - lo
+    out = []
+
+    for oy in range(out_rows):
+        # sample position in input rows, pixel centres
+        fy = (oy + 0.5) * rows_in / out_rows - 0.5
+        y0 = int(math.floor(fy))
+        w = fy - y0
+        if y0 < 0:
+            y0, w = 0, 0.0
+        y1 = y0 + 1
+        if y1 > rows_in - 1:
+            y1, w = rows_in - 1, 0.0 if y0 > rows_in - 1 else w
+        y0 = min(y0, rows_in - 1)
+
+        a = frames[y0][1]
+        b = frames[y1][1]
         row = bytearray()
-        for v in values:
-            d = v - floor
-            if d not in lut:
-                lut[d] = bytes(ramp(d))
-            row += lut[d]
-        rows.append(bytes(row))
-    return png(bins, len(rows), rows)
+        if w == 0.0:
+            for i in range(lo, hi):
+                row += bytes(ramp(a[i] - floor))
+        else:
+            for i in range(lo, hi):
+                v = a[i] + (b[i] - a[i]) * w
+                row += bytes(ramp(v - floor))
+        out.append(bytes(row))
+
+    return png(cols, out_rows, out)
 
 
 def b64(data):
@@ -177,274 +194,315 @@ def b64(data):
 # -------------------------------------------------------------------- html ---
 
 CSS = """
-:root{--bg:#fbfbfa;--fg:#1a1a18;--dim:#6b6b66;--line:#e0e0dc;--card:#fff;
-      --warn-bg:#fff6e0;--warn-fg:#7a5200;--accent:#2a5f8f}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
-      --bg:#14161a;--fg:#e8e8e4;--dim:#9a9a94;--line:#2a2e35;--card:#1b1e24;
-      --warn-bg:#3a2e12;--warn-fg:#f0cd7a;--accent:#7fb3e0}}
+:root{--bg:#f5f6f7;--card:#fff;--fg:#14181d;--dim:#5e6670;--faint:#8b939c;
+      --rule:#dcdfe3;--soft:#eceef1;--accent:#2f5d8c;
+      --warn-bg:#fdf3dd;--warn-fg:#7a5600}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+      color-scheme:dark;
+      --bg:#0f1317;--card:#161b21;--fg:#e6eaee;--dim:#98a2ac;--faint:#6d767f;
+      --rule:#242b33;--soft:#1b2129;--accent:#79aada;
+      --warn-bg:#33290f;--warn-fg:#f0cd7a}}
+:root[data-theme="dark"]{color-scheme:dark;
+      --bg:#0f1317;--card:#161b21;--fg:#e6eaee;--dim:#98a2ac;--faint:#6d767f;
+      --rule:#242b33;--soft:#1b2129;--accent:#79aada;
+      --warn-bg:#33290f;--warn-fg:#f0cd7a}
 *{box-sizing:border-box}
-body{margin:0;padding:24px 16px 64px;background:var(--bg);color:var(--fg);
-     font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-.wrap{max-width:960px;margin:0 auto}
-h1{font-size:20px;margin:0 0 4px}
-h2{font-size:16px;margin:0 0 2px;font-variant-numeric:tabular-nums}
-.sub{color:var(--dim);margin:0 0 24px}
-.meta{font-weight:400;color:var(--dim);font-size:13px}
-section{background:var(--card);border:1px solid var(--line);border-radius:10px;
-        padding:16px;margin:0 0 18px}
-.warn{background:var(--warn-bg);color:var(--warn-fg);border-radius:6px;
-      padding:8px 10px;margin:10px 0 0;font-size:13px}
-.map{display:grid;grid-template-columns:58px 1fr;margin-top:14px}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,
+     BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1000px;margin:0 auto;padding-block:32px 64px;padding-left:16px;
+      padding-right:16px}
+h1{font-size:21px;font-weight:600;margin:0 0 6px;letter-spacing:-.01em}
+.sub{color:var(--dim);margin:0 0 4px;font-variant-numeric:tabular-nums}
+h2{font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
+   color:var(--dim);margin:34px 0 0;padding-bottom:7px;
+   border-bottom:1px solid var(--rule)}
+.warn{background:var(--warn-bg);color:var(--warn-fg);border-radius:5px;
+      padding:9px 11px;margin:14px 0 0;font-size:13px}
+.legend{display:flex;align-items:center;gap:9px;margin:14px 0 0;font-size:12px;
+        color:var(--dim);flex-wrap:wrap;font-variant-numeric:tabular-nums}
+.legend .grad{height:9px;flex:1;min-width:160px;border-radius:2px}
+
+.regions{display:grid;gap:18px;margin-top:16px}
+.region{background:var(--card);border:1px solid var(--rule);border-radius:7px;
+        padding:11px 13px 13px}
+.rhead{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+       flex-wrap:wrap;margin-bottom:9px}
+.rband{font-weight:600;font-variant-numeric:tabular-nums}
+.rpeak{font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums}
+.rpeak b{color:var(--accent)}
+.map{display:grid;grid-template-columns:56px 1fr}
 .tcol{position:relative}
-.tcol span{position:absolute;right:8px;transform:translateY(-50%);
-           font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;
-           white-space:nowrap}
+.tcol span{position:absolute;right:7px;transform:translateY(-50%);font-size:11px;
+           color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
 .img{position:relative}
-.img img{display:block;width:100%;image-rendering:pixelated;
-         image-rendering:crisp-edges;border-radius:3px}
-.ruler{display:grid;grid-template-columns:58px 1fr;margin-top:2px}
-.ruler div{position:relative;height:18px}
+.img img{display:block;width:100%;max-width:100%;border-radius:3px;
+         image-rendering:auto}
+.ruler{display:grid;grid-template-columns:56px 1fr;margin-top:3px}
+.ruler div{position:relative;height:17px}
 .ruler span{position:absolute;transform:translateX(-50%);font-size:11px;
-            color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}
-.readout{position:absolute;top:4px;right:6px;background:rgba(0,0,0,.72);
-         color:#fff;font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
-         padding:3px 6px;border-radius:4px;opacity:0;pointer-events:none;
-         transition:opacity .1s;white-space:nowrap}
-table{border-collapse:collapse;width:100%;margin-top:14px;font-size:13px;
+            color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.quiet{color:var(--faint);font-size:12px;margin:6px 0 0}
+.readout{position:absolute;top:5px;right:6px;background:rgba(8,10,14,.84);
+         color:#fff;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;
+         padding:3px 7px;border-radius:4px;opacity:0;pointer-events:none;
+         transition:opacity .08s;white-space:nowrap;z-index:2;
+         font-variant-numeric:tabular-nums}
+.img:hover{cursor:crosshair}
+
+.tscroll{overflow-x:auto;margin-top:14px;border:1px solid var(--rule);
+         border-radius:6px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:580px;
       font-variant-numeric:tabular-nums}
-th,td{text-align:right;padding:4px 8px;border-bottom:1px solid var(--line)}
+th,td{text-align:right;padding:5px 10px;border-bottom:1px solid var(--soft)}
 th:first-child,td:first-child{text-align:left}
-th{color:var(--dim);font-weight:600;font-size:12px}
-tbody tr:last-child td{border-bottom:none}
-.bar{display:inline-block;height:8px;background:var(--accent);border-radius:2px;
+th{color:var(--faint);font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+   font-weight:600;background:var(--card);position:sticky;top:0;
+   border-bottom:1px solid var(--rule)}
+tr:last-child td{border-bottom:none}
+.bar{display:inline-block;height:7px;background:var(--accent);border-radius:2px;
      vertical-align:middle}
 .none{color:var(--dim);margin-top:14px}
-.legend{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;
-        color:var(--dim);flex-wrap:wrap}
-.legend .grad{height:10px;flex:1;min-width:180px;border-radius:3px}
-@media (max-width:560px){.map,.ruler{grid-template-columns:44px 1fr}}
+@media (max-width:560px){.map,.ruler{grid-template-columns:42px 1fr}}
 """
+
+
+HOVER_BASE = -185      # the byte the logger stores is dBm minus this
 
 JS = """
 document.querySelectorAll('.img').forEach(function(el){
   var out=el.querySelector('.readout'), img=el.querySelector('img');
-  var bins=+el.dataset.bins, rows=+el.dataset.rows;
-  var f0=+el.dataset.f0, df=+el.dataset.df;
-  var times=el.dataset.times.split(',');
-  var raw=atob(el.dataset.levels);
-  el.addEventListener('mousemove', function(e){
+  var lo=+el.dataset.lo, cols=+el.dataset.cols;
+  function show(e){
     var r=img.getBoundingClientRect();
-    var x=Math.min(bins-1,Math.max(0,Math.floor((e.clientX-r.left)/r.width*bins)));
-    var y=Math.min(rows-1,Math.max(0,Math.floor((e.clientY-r.top)/r.height*rows)));
-    var dbm=raw.charCodeAt(y*bins+x)+(HOVER_BASE);
-    out.textContent=(f0+x*df).toFixed(4)+' MHz  '+times[y]+'  '+dbm+' dBm';
+    if(!r.width||!r.height) return;
+    var c=Math.floor((e.clientX-r.left)/r.width*cols);
+    var y=Math.floor((e.clientY-r.top)/r.height*ROWS);
+    c=c<0?0:(c>cols-1?cols-1:c);
+    y=y<0?0:(y>ROWS-1?ROWS-1:y);
+    var b=lo+c;
+    out.textContent=(F0+b*DF).toFixed(4)+' MHz  '+T[y]+'  '
+                    +(L.charCodeAt(y*BINS+b)+HB)+' dBm';
     out.style.opacity=1;
-  });
+  }
+  el.addEventListener('mousemove',show);
+  el.addEventListener('touchmove',function(e){
+    if(e.touches.length===1){show(e.touches[0]); e.preventDefault();}
+  },{passive:false});
   el.addEventListener('mouseleave',function(){out.style.opacity=0;});
 });
 """
 
 
-def esc(text):
-    return html.escape(str(text), quote=True)
+def esc(t):
+    return html.escape(str(t), quote=True)
 
 
-def hour_section(h, freqs, flare_db):
-    block, floor = h["frames"], h["floor"]
-    bins = len(freqs)
-    rows = len(block)
-    span = f"{hhmmss(h['hour'] * 3600)} – {hhmmss((h['hour'] + 1) * 3600)}"
+def time_labels(frames, count=6):
+    """Row positions, as percentages, for the time gutter."""
+    n = len(frames)
+    if n == 1:
+        return [(50.0, hhmmss(frames[0][0]))]
+    picks = sorted({k * (n - 1) // (count - 1) for k in range(count)})
+    return [((i + 0.5) / n * 100, hhmmss(frames[i][0])) for i in picks]
 
-    img = b64(heat_png(block, floor, bins))
-    levels = bytes(max(0, min(255, v - HOVER_BASE))
-                   for _, values in block for v in values)
-    times = ",".join(hhmmss(t) for t, _ in block)
 
-    # A few time labels down the side, and frequency labels under the map.
-    tlabels = []
-    for k in range(min(6, rows)):
-        row = k * (rows - 1) // max(1, min(6, rows) - 1) if rows > 1 else 0
-        pct = (row + 0.5) / rows * 100
-        tlabels.append(f'<span style="top:{pct:.3f}%">{hhmmss(block[row][0])}</span>')
+def flare_table(flares, floor, args, where):
+    """The bins that rose above the floor, up the band. Not capped: a long table
+    is the honest answer when a lot of the band was busy."""
+    if not flares:
+        return (f'<p class="quiet">Nothing rose {args.flare} dB above the '
+                f'{floor} dBm floor {where}.</p>')
+    rows = []
+    for f in flares:
+        pct = 100 * f["hits"] / f["frames"]
+        rows.append(
+            f'<tr><td>{f["freq"]:.4f} MHz</td><td>{f["peak"]} dBm</td>'
+            f'<td>+{f["over"]}</td><td>{f["hits"]}</td>'
+            f'<td>{pct:.1f}%</td><td>{hhmmss(f["first"])}</td>'
+            f'<td>{hhmmss(f["last"])}</td>'
+            f'<td><span class="bar" style="width:{max(2, pct * 0.6):.0f}px">'
+            f'</span></td></tr>')
+    return ('<div class="tscroll"><table><thead><tr><th>frequency</th><th>peak</th>'
+            '<th>over floor</th><th>up</th><th>of session</th><th>first</th>'
+            '<th>last</th><th></th></tr></thead><tbody>'
+            + "".join(rows) + '</tbody></table></div>')
 
-    flabels = []
-    for k in range(5):
-        i = k * (bins - 1) // 4
-        pct = (i + 0.5) / bins * 100
-        flabels.append(f'<span style="left:{pct:.3f}%">{freqs[i]:.3f}</span>')
 
-    parts = [f'<section><h2>{span} <span class="meta">· {rows} frames '
-             f'· noise floor {floor} dBm</span></h2>']
-    if h["clipping"]:
-        parts.append(f'<p class="warn">{esc(h["clipping"])}</p>')
+def region_html(frames, freqs, lo, hi, floor, flares_by_bin, args):
+    cols = hi - lo
+    rows_in = len(frames)
+    out_rows = max(MIN_ROWS, min(MAX_ROWS, rows_in if rows_in >= MIN_ROWS
+                                 else rows_in * ((MIN_ROWS + rows_in - 1) // rows_in)))
+    img = b64(region_png(frames, lo, hi, floor, out_rows))
 
-    parts.append(
-        f'<div class="map"><div class="tcol">{"".join(tlabels)}</div>'
-        f'<div class="img" data-bins="{bins}" data-rows="{rows}" '
-        f'data-f0="{freqs[0]:.6f}" data-df="{(freqs[1] - freqs[0]) if bins > 1 else 0:.6f}" '
-        f'data-times="{esc(times)}" data-levels="{b64(levels)}">'
-        f'<img alt="heat map, {span}" src="data:image/png;base64,{img}">'
+    peak = max(max(v[lo:hi]) for _, v in frames)
+    at = None
+    for _, v in frames:
+        for i in range(lo, hi):
+            if v[i] == peak:
+                at = freqs[i]
+                break
+        if at is not None:
+            break
+    hits = [f for f in flares_by_bin if lo <= f["bin"] < hi]
+
+    tl = "".join(f'<span style="top:{pct:.3f}%">{lab}</span>'
+                 for pct, lab in time_labels(frames))
+    fl = "".join(
+        f'<span style="left:{(i - lo + 0.5) / cols * 100:.3f}%">{freqs[i]:.3f}</span>'
+        for i in (lo + k * (cols - 1) // 4 for k in range(5)))
+
+    return (
+        f'<div class="region"><div class="rhead">'
+        f'<span class="rband">{freqs[lo]:.3f} &ndash; {freqs[hi - 1]:.3f} MHz</span>'
+        f'<span class="rpeak">peak <b>{peak} dBm</b> at {at:.4f} &middot; '
+        f'{len(hits)} bin{"" if len(hits) == 1 else "s"} over '
+        f'+{args.flare}</span></div>'
+        f'<div class="map"><div class="tcol">{tl}</div>'
+        f'<div class="img" data-lo="{lo}" data-cols="{cols}">'
+        f'<img alt="{freqs[lo]:.3f} to {freqs[hi - 1]:.3f} MHz" '
+        f'src="data:image/png;base64,{img}">'
         f'<div class="readout"></div></div></div>'
-        f'<div class="ruler"><div></div><div>{"".join(flabels)}</div></div>')
-
-    if not h["flares"]:
-        parts.append(f'<p class="none">Nothing rose {flare_db} dB above the floor.</p>')
-    else:
-        parts.append(
-            '<table><thead><tr><th>frequency</th><th>peak</th><th>over floor</th>'
-            '<th>frames</th><th>of hour</th><th></th></tr></thead><tbody>')
-        for f in h["flares"]:
-            pct = 100 * f["hits"] / f["frames"]
-            parts.append(
-                f'<tr><td>{f["freq"]:.4f} MHz</td><td>{f["peak"]} dBm</td>'
-                f'<td>+{f["over"]}</td><td>{f["hits"]} / {f["frames"]}</td>'
-                f'<td>{pct:.0f}%</td>'
-                f'<td><span class="bar" style="width:{max(2, pct * 0.6):.0f}px"></span></td></tr>')
-        parts.append('</tbody></table>')
-
-    parts.append('</section>')
-    return "".join(parts)
+        f'<div class="ruler"><div></div><div>{fl}</div></div>'
+        + flare_table(hits, floor, args, "in this region")
+        + '</div>')
 
 
-def render_html(path, freqs, frames, hours, args):
+def render_html(path, freqs, frames, session, args):
+    floor = session["floor"]
+    span = frames[-1][0] - frames[0][0]
     grad = ",".join(f"rgb{ramp(d)} {min(100, d / STOPS[-1][0] * 100):.0f}%"
                     for d, _ in STOPS)
-
-    seen = {}
-    for h in hours:
-        for f in h["flares"]:
-            was = seen.get(f["freq"], [0, 0, -999])
-            seen[f["freq"]] = [was[0] + 1, was[1] + f["hits"], max(was[2], f["peak"])]
+    edges = [(lo, min(lo + args.region, len(freqs)))
+             for lo in range(0, len(freqs), args.region)]
 
     body = [f'<div class="wrap"><h1>{esc(path)}</h1>',
-            f'<p class="sub">{len(frames)} frames · {len(freqs)} bins · '
-            f'{freqs[0]:.4f}–{freqs[-1]:.4f} MHz · '
-            f'{hhmmss(frames[0][0])} to {hhmmss(frames[-1][0])} · '
-            f'{len(hours)} hour(s) · flare threshold {args.flare} dB · '
-            f'rendered {datetime.now():%Y-%m-%d %H:%M}</p>',
-            f'<section><h2>Colour <span class="meta">· dB above that hour\'s '
-            f'noise floor</span></h2><div class="legend"><span>floor</span>'
-            f'<div class="grad" style="background:linear-gradient(90deg,{grad})"></div>'
-            f'<span>+{STOPS[-1][0]} dB</span></div>']
+            f'<p class="sub">{len(frames)} frames &middot; '
+            f'{hhmmss(frames[0][0])} to {hhmmss(frames[-1][0])} '
+            f'({span // 3600} h {span % 3600 // 60:02d} min) &middot; '
+            f'{len(freqs)} bins &middot; {freqs[0]:.4f}&ndash;{freqs[-1]:.4f} MHz '
+            f'&middot; noise floor {floor} dBm</p>',
+            f'<p class="sub">{len(edges)} region'
+            f'{"" if len(edges) == 1 else "s"} of up to {args.region} bins, each '
+            f'covering the whole session &middot; rendered '
+            f'{datetime.now():%Y-%m-%d %H:%M}</p>']
 
-    if seen:
-        body.append('<table><thead><tr><th>frequency</th><th>hours seen</th>'
-                    '<th>frames</th><th>peak</th></tr></thead><tbody>')
-        for f, (nh, hits, peak) in sorted(seen.items(), key=lambda kv: -kv[1][1]):
-            body.append(f'<tr><td>{f:.4f} MHz</td><td>{nh}</td><td>{hits}</td>'
-                        f'<td>{peak} dBm</td></tr>')
-        body.append('</tbody></table>')
-    else:
-        body.append(f'<p class="none">Nothing reached {args.flare} dB over the '
-                    f'floor in any hour.</p>')
-    body.append('</section>')
+    if session["clipping"]:
+        body.append(f'<p class="warn">{esc(session["clipping"])}</p>')
 
-    for h in hours:
-        body.append(hour_section(h, freqs, args.flare))
+    body.append(f'<div class="legend"><span>floor</span>'
+                f'<div class="grad" style="background:linear-gradient(90deg,{grad})">'
+                f'</div><span>+{STOPS[-1][0]} dB over it</span></div>')
+
+    flares = session["flares"]
+    body.append(
+        f'<h2>Band by band</h2>'
+        f'<p class="sub">{len(flares)} of {len(freqs)} bins rose at least '
+        f'{args.flare} dB above the {floor} dBm floor; each region lists its own '
+        f'below its map, up the band.</p><div class="regions">')
+    for lo, hi in edges:
+        body.append(region_html(frames, freqs, lo, hi, floor,
+                                session["flares"], args))
     body.append('</div>')
 
-    return ("<!doctype html><html><head><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            f"<title>{esc(path)} – spectrum log</title><style>{CSS}</style></head>"
-            f"<body>{''.join(body)}"
-            f"<script>var HOVER_BASE={HOVER_BASE};{JS}</script></body></html>")
+    body.append('</div>')
+
+    # One blob for the whole grid rather than one per region: the regions do
+    # not overlap, so it is the same bytes either way, and it keeps the lookup
+    # a single index. Same byte the logger stores, dBm - HOVER_BASE.
+    levels = bytes(max(0, min(255, v - HOVER_BASE))
+                   for _, values in frames for v in values)
+    df = (freqs[1] - freqs[0]) if len(freqs) > 1 else 0.0
+    script = ('<script>var HB=' + str(HOVER_BASE)
+              + ',BINS=' + str(len(freqs)) + ',ROWS=' + str(len(frames))
+              + ',F0=' + f'{freqs[0]:.6f}' + ',DF=' + f'{df:.6f}'
+              + ',T="' + ",".join(hhmmss(t) for t, _ in frames) + '".split(",")'
+              + ',L=atob("' + b64(levels) + '");' + JS + '</script>')
+
+    return ('<!doctype html><html><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>{esc(path)} – spectrum log</title><style>{CSS}</style>'
+            f'</head><body>{"".join(body)}{script}</body></html>')
 
 
 # -------------------------------------------------------------------- text ---
 
-def shade(delta, colour):
-    i = min(len(RAMP) - 1, max(0, delta // STEP))
-    ch = RAMP[i]
-    if colour and i:
-        return f"\033[38;5;{COLOURS[i]}m{ch}\033[0m"
-    return ch
+def render_text(freqs, frames, session, args):
+    floor = session["floor"]
+    print(f"shading, dB over the {floor} dBm floor: "
+          + "  ".join(f"{RAMP[i]!r}={i * STEP}+" for i in range(1, len(RAMP))))
+    if session["clipping"]:
+        print(f"! {session['clipping']}")
 
-
-def fold(values, width):
-    """Fold bins down to `width` columns, keeping the strongest of each group."""
-    n = len(values)
-    if width >= n:
-        return values
-    return [max(values[i * n // width:(i + 1) * n // width]) for i in range(width)]
-
-
-def fold_axis(freqs, width):
-    """Fold the axis the same way, labelling each column with its LEFT edge."""
-    n = len(freqs)
-    if width >= n:
-        return freqs
-    return [freqs[i * n // width] for i in range(width)]
-
-
-def render_text(freqs, hours, args):
-    legend = "  ".join(f"{RAMP[i]!r}={i * STEP}+" for i in range(1, len(RAMP)))
-    print(f"shading, dB over that hour's floor: {legend}")
-
-    for h in hours:
-        block, floor = h["frames"], h["floor"]
-        span = f"{hhmmss(h['hour'] * 3600)}-{hhmmss((h['hour'] + 1) * 3600)}"
-        print(f"\n=== {span}   {len(block)} frames, noise floor {floor} dBm ===")
-        if h["clipping"]:
-            print(f"{'':9}! {h['clipping']}")
-
-        width = min(args.width, len(freqs))
-        shown = fold_axis(freqs, width)
-        ticks = [" "] * width
-        labels = [" "] * width
-        for c in range(0, width, 16):
-            ticks[c] = "|"
-            for k, ch in enumerate(f"{shown[c]:.3f}"):
-                if c + k < width:
-                    labels[c + k] = ch
-        print(" " * 9 + "".join(ticks))
-        print(" " * 9 + "".join(labels))
-
-        buckets = max(1, min(args.rows or len(block), len(block)))
+    for lo in range(0, len(freqs), args.region):
+        hi = min(lo + args.region, len(freqs))
+        width = min(args.width, hi - lo)
+        fold = (hi - lo + width - 1) // width
+        print(f"\n=== {freqs[lo]:.3f} - {freqs[hi - 1]:.3f} MHz ===")
+        buckets = max(1, min(args.rows or len(frames), len(frames)))
         for b in range(buckets):
-            lo = b * len(block) // buckets
-            hi = max(lo + 1, (b + 1) * len(block) // buckets)
-            cells = [max(col) for col in zip(*(fold(v, width) for _, v in block[lo:hi]))]
-            line = "".join(shade(v - floor, args.color) for v in cells)
-            print(f"{hhmmss(block[lo][0]):>8} {line}")
+            a = b * len(frames) // buckets
+            z = max(a + 1, (b + 1) * len(frames) // buckets)
+            cells = []
+            for c in range(width):
+                v = max(max(fr[1][lo + c * fold:min(hi, lo + (c + 1) * fold)])
+                        for fr in frames[a:z])
+                cells.append(v)
+            line = "".join(RAMP[min(len(RAMP) - 1, max(0, (v - floor) // STEP))]
+                           for v in cells)
+            print(f"{hhmmss(frames[a][0]):>8} {line}")
 
-        if not h["flares"]:
-            print(f"{'':9}nothing above the floor by {args.flare} dB")
+        hits = [f for f in session["flares"] if lo <= f["bin"] < hi]
+        if not hits:
+            print(f"  nothing rose {args.flare} dB above the floor here")
             continue
-        print(f"{'':9}flares, at least {args.flare} dB over floor:")
-        for f in h["flares"]:
-            print(f"{'':11}{f['freq']:9.4f} MHz  peak {f['peak']:5d} dBm "
-                  f"(+{f['over']:2d})  {f['hits']:4d}/{f['frames']:<4d} frames  "
-                  f"{100 * f['hits'] / f['frames']:3.0f}%")
+        print(f"  {'frequency':>13}  {'peak':>8}  {'over':>5}  {'up':>5}  "
+              f"{'first':>8}  {'last':>8}")
+        for f in hits:
+            print(f"  {f['freq']:9.4f} MHz  {f['peak']:5d} dBm  {f['over']:+5d}  "
+                  f"{f['hits']:5d}  {hhmmss(f['first'])}  {hhmmss(f['last'])}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("csv", help="a CSV written by k5logdump.py")
-    ap.add_argument("-o", "--out", help="HTML file to write (default: alongside the CSV)")
+    ap.add_argument("-o", "--out", help="HTML file to write (default: beside the CSV)")
+    ap.add_argument("--region", type=int, default=REGION,
+                    help=f"bins per map (default {REGION})")
     ap.add_argument("--flare", type=int, default=10,
-                    help="dB over the hour's noise floor that counts as a flare")
+                    help="dB over the session's noise floor that counts as a flare "
+                         "(default 10)")
     ap.add_argument("--text", action="store_true", help="print to the terminal instead")
-    ap.add_argument("--rows", type=int, default=12, help="text: time rows per hour")
+    ap.add_argument("--rows", type=int, default=24, help="text: time rows per region")
     ap.add_argument("--width", type=int, default=128, help="text: max columns")
-    ap.add_argument("--color", action="store_true", help="text: ANSI colour")
     args = ap.parse_args()
+    if args.region < 1:
+        sys.exit("--region must be at least 1")
 
     freqs, frames = load(args.csv)
-    hours = analyse(frames, freqs, args.flare)
+    regions = (len(freqs) + args.region - 1) // args.region
+    if regions > 64 and not args.text:
+        print(f"  note: {len(freqs)} bins / {args.region} = {regions} maps. That "
+              f"is a lot of images; --region {max(128, len(freqs) // 32)} would "
+              f"give about 32.", file=sys.stderr)
+    session = analyse(frames, freqs, args.flare)
+    span = frames[-1][0] - frames[0][0]
     print(f"{args.csv}: {len(frames)} frames, {len(freqs)} bins "
           f"{freqs[0]:.4f}-{freqs[-1]:.4f} MHz, "
-          f"{hhmmss(frames[0][0])} to {hhmmss(frames[-1][0])}, {len(hours)} hour(s)")
+          f"{hhmmss(frames[0][0])} to {hhmmss(frames[-1][0])} "
+          f"({span // 3600}h {span % 3600 // 60:02d}m), floor {session['floor']} dBm")
 
     if args.text:
-        render_text(freqs, hours, args)
+        render_text(freqs, frames, session, args)
         return 0
 
     out = args.out or (args.csv.rsplit(".", 1)[0] + ".html")
-    doc = render_html(args.csv, freqs, frames, hours, args)
+    doc = render_html(args.csv, freqs, frames, session, args)
     with open(out, "w") as f:
         f.write(doc)
-    print(f"  wrote {out}  ({len(doc) / 1024:.0f} KB)")
+    print(f"  {(len(freqs) + args.region - 1) // args.region} region maps, "
+          f"{len(session['flares'])} flares -> {out} ({len(doc) / 1024:.0f} KB)")
     return 0
 
 

@@ -186,35 +186,6 @@ typedef struct PeakInfo
 
 void APP_RunSpectrum(void);
 
-// F+7 runs the same analyser with the live UART stream on: once a second it
-// sends the strongest reading each bin saw in that second. A maximum, not a
-// mean, so nothing here needs floating point - the firmware has no room for
-// the soft-float that a power average drags in.
-//
-// One packet per second, little-endian, 152 bytes:
-//
-//   0   2  magic "K5"
-//   2   1  stream format version (2; 1 was a 10 s power mean)
-//   3   1  bins actually measured, 16/32/64/128 - the rest of the payload is 0
-//   4   2  sequence, wraps at 65536 - a gap means packets were lost
-//   6   4  seconds since the stream started
-//  10   4  frequency of bin 0, 10 Hz units
-//  14   2  bin spacing, 10 Hz units
-//  16   2  sweeps completed in this second (0 = the analyser was listening)
-//  18   2  dBm of a zero byte (int16, -185)
-//  20   1  dB per step (1)
-//  21   1  band correction already applied (int8, informational)
-//  22 128  one byte per bin, byte = dBm + 185, always 128 bytes
-// 150   2  CRC-16/XMODEM over bytes 0..149 (CRC_Calculate1, driver/crc.c)
-//
-#define SPECTRUM_STREAM_VERSION  2
-#define SPECTRUM_STREAM_HEAD     22
-#define SPECTRUM_STREAM_BINS     128
-#define SPECTRUM_STREAM_BYTES    (SPECTRUM_STREAM_HEAD + SPECTRUM_STREAM_BINS + 2)
-#define SPECTRUM_STREAM_DBM_BASE (-185)
-#define SPECTRUM_STREAM_RSSI_OFF (-160)   // dBm = rssi/2 + this + band correction
-
-void APP_RunSpectrumStream(void);
 
 // Reached into by the Si4732 app (app/si.c), which reuses the spectrum's
 // frequency entry and its battery indicator rather than carrying its own.

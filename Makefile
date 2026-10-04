@@ -217,6 +217,7 @@ OBJS += app/spectrum.o
 endif
 ifeq ($(ENABLE_SPECTRUM_LOGGER), 1)
 OBJS += app/speclog.o
+OBJS += app/widelog.o
 endif
 OBJS += app/scanner.o
 ifeq ($(ENABLE_UART),1)
